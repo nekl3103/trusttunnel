@@ -9,6 +9,9 @@ msgstr "TrustTunnel"
 msgid "Servers"
 msgstr "Серверы"
 
+msgid "Could not create a server entry. Reload the page and try again."
+msgstr "Не удалось создать запись сервера. Обновите страницу и попробуйте снова."
+
 msgid "Site groups"
 msgstr "Группы сайтов"
 
