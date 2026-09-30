@@ -1483,15 +1483,33 @@ return {
 				return v == 'true' ? '1' : (v == 'false' ? '0' : null);
 			}
 			let res = { addresses: [], dns_upstreams: [] };
-			for (let line in split(produced, '\n')) {
+			let produced_lines = split(produced, '\n');
+			for (let i = 0; i < length(produced_lines); i++) {
+				let line = produced_lines[i];
 				let kv = match(line, /^ *([a-z0-9_]+) *= *(.*)$/);
 				if (!kv) continue;
 				let k = kv[1], v = trim(kv[2]), s;
 				switch (k) {
 				case 'hostname': case 'username': case 'password':
-				case 'certificate': case 'custom_sni': case 'client_random':
+				case 'custom_sni': case 'client_random':
 					s = unquote(v);
 					if (s != null && length(s)) res[k] = s;
+					break;
+				case 'certificate':
+					// setup_wizard writes a pinned PEM as a TOML multiline
+					// literal. Parsing only key=value lines used to discard the
+					// PEM body and could leave a one-character certificate in UCI.
+					if (v == "'''" || v == '"""') {
+						let delimiter = v, block = [];
+						for (i = i + 1; i < length(produced_lines); i = i + 1) {
+							if (trim(produced_lines[i]) == delimiter) break;
+							push(block, produced_lines[i]);
+						}
+						s = join('\n', block);
+					} else {
+						s = unquote(v);
+					}
+					if (s != null && length(trim(s))) res.certificate = s;
 					break;
 				case 'upstream_protocol':
 					s = unquote(v);

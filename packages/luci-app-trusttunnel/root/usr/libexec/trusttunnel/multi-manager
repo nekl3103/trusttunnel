@@ -441,6 +441,14 @@ publish_dnsmasq() {
 	if [ ! -f "$OUTDIR/dnsmasq.loaded" ] || ! cmp -s "$OUTDIR/dnsmasq.conf" "$OUTDIR/dnsmasq.loaded"; then
 		cp "$OUTDIR/dnsmasq.conf" "$OUTDIR/dnsmasq.loaded"
 		$DNSMASQ_INIT restart >/dev/null 2>&1
+	else
+		# build_routing() recreates the nft table, so all dynamically learned
+		# addresses disappear even when the domain mapping did not change.
+		# dnsmasq can still hold the old answers in its cache and does not add
+		# cached answers to the newly created sets. A reload clears that cache
+		# without interrupting the router's DNS service with a full restart.
+		$DNSMASQ_INIT reload >/dev/null 2>&1 ||
+			$DNSMASQ_INIT restart >/dev/null 2>&1
 	fi
 }
 

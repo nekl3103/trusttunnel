@@ -88,6 +88,8 @@ PATH="$TT_TEST_TMP/bin:$PATH" TT_FUNCTIONS="$stub" TT_DEVICE_ROUTING=1 \
 assert_contains "$(cat "$TT_TEST_TMP/nft.log")" \
 	'add rule inet trusttunnel_multi r_grp_video ip saddr 192.168.1.20 drop' \
 	"device routing limits the group killswitch to the assigned source"
+assert_contains "$(cat "$TT_TEST_TMP/dns-init.log")" 'reload' \
+	"unchanged mappings clear the dnsmasq cache after recreating nft sets"
 
 cat > "$TT_TEST_TMP/bin/dnsmasq" <<'EOF'
 #!/bin/sh
