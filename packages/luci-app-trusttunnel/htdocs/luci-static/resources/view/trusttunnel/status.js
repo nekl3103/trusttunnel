@@ -136,6 +136,7 @@ function qualityChart(history) {
 
 return view.extend({
 	handleAction: function(action, ev) {
+		var self = this;
 		ui.showModal(_('Please wait'), [ E('p', { 'class': 'spinning' }, _('Running…')) ]);
 		return callService(action).then(function(res) {
 			ui.hideModal();
@@ -148,10 +149,33 @@ return view.extend({
 				ui.addNotification(null, E('pre', {}, res.output || _('Command failed')), 'warning');
 			else
 				ui.addNotification(null, E('p', {}, _('Done')), 'info');
+			if (self.refreshStatus)
+				return self.refreshStatus();
 		}).catch(function(e) {
 			ui.hideModal();
 			ui.addNotification(null, E('p', {}, e.message || String(e)), 'danger');
 		});
+	},
+
+	renderActions: function(st) {
+		var buttons = [];
+		if (st.running) {
+			buttons.push(E('button', {
+				'class': 'cbi-button cbi-button-reset',
+				'click': ui.createHandlerFn(this, 'handleAction', 'stop')
+			}, _('Stop')));
+			buttons.push(' ');
+			buttons.push(E('button', {
+				'class': 'cbi-button cbi-button-action',
+				'click': ui.createHandlerFn(this, 'handleAction', 'restart')
+			}, _('Restart')));
+		} else {
+			buttons.push(E('button', {
+				'class': 'cbi-button cbi-button-apply',
+				'click': ui.createHandlerFn(this, 'handleAction', 'start')
+			}, _('Start')));
+		}
+		return E('div', {}, buttons);
 	},
 
 	// Вердикт и факты отрисовываются ПОРОЗНЬ, потому что живут в разных местах
@@ -384,6 +408,10 @@ return view.extend({
 		var verdictBox = E('div', {}, this.renderVerdict(st));
 		var factsBox = E('div', {}, this.renderFacts(st));
 		var serversBox = E('div', {}, this.renderServers(st));
+		var actionsBox = E('div', {}, this.renderActions(st));
+		var serversSection = E('div', { 'class': 'cbi-section' },
+			st.multi_server && st.running && (st.servers || []).length
+				? [ E('h3', {}, _('Servers and routing')), serversBox ] : []);
 		var versionBox = E('div', {}, E('em', {}, _('Checking…')));
 		var logBox = E('pre', {
 			'style': 'max-height:22em;overflow:auto;margin:0'
@@ -402,13 +430,18 @@ return view.extend({
 		// наборов обхода. При заполненном списком наборе это самая тяжёлая
 		// операция пакета, и удвоенный интервал вдвое снижает нагрузку без
 		// заметной потери отзывчивости.
-		poll.add(function() {
+		this.refreshStatus = function() {
 			return callStatus().then(function(s) {
 				dom.content(verdictBox, self.renderVerdict(s));
 				dom.content(factsBox, self.renderFacts(s));
 				dom.content(serversBox, self.renderServers(s));
+				dom.content(actionsBox, self.renderActions(s));
+				dom.content(serversSection,
+					s.multi_server && s.running && (s.servers || []).length
+						? [ E('h3', {}, _('Servers and routing')), serversBox ] : []);
 			});
-		}, 10);
+		};
+		poll.add(this.refreshStatus, 10);
 
 		poll.add(function() {
 			return callLog(80).then(function(r) {
@@ -442,30 +475,12 @@ return view.extend({
 
 			E('div', { 'class': 'cbi-section' }, [
 				verdictBox,
-				E('div', { 'style': 'margin-top:1em' }, [
-					E('button', {
-						'class': 'cbi-button cbi-button-apply',
-						'click': ui.createHandlerFn(this, 'handleAction', 'start')
-					}, _('Start')),
-					' ',
-					E('button', {
-						'class': 'cbi-button cbi-button-reset',
-						'click': ui.createHandlerFn(this, 'handleAction', 'stop')
-					}, _('Stop')),
-					' ',
-					E('button', {
-						'class': 'cbi-button cbi-button-action',
-						'click': ui.createHandlerFn(this, 'handleAction', 'restart')
-					}, _('Restart'))
-				])
+				E('div', { 'style': 'margin-top:1em' }, [ actionsBox ])
 			]),
 
 			E('div', { 'class': 'cbi-section' }, [ pair ]),
 
-			st.multi_server ? E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, _('Servers and routing')),
-				serversBox
-			]) : '',
+			serversSection,
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Client log')),

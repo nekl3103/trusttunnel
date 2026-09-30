@@ -400,6 +400,11 @@ function multi_runtime() {
 		let p = split(line, '\t');
 		if (length(p) < 7) continue;
 		let id = p[0], h = health[id] ?? { state: 'down', latency: 999999, loss: 100, checked: 0, score: 999999, failures: 0, endpoint_latency: 999999, speed: 0, success: 0 };
+		// Runtime files intentionally survive a stop/restart, but a deleted or
+		// disabled UCI section must disappear from the UI immediately instead
+		// of looking like a still configured subscription.
+		if (uciget('trusttunnel.' + id) != 'server' ||
+		    uciget('trusttunnel.' + id + '.enabled') == '0') continue;
 		let dev = trim(readfile(base + '/' + id + '/device') ?? '');
 		push(servers, {
 			id: id, name: uciget('trusttunnel.' + id + '.name') || id,
@@ -414,6 +419,8 @@ function multi_runtime() {
 	for (let line in split(readfile(base + '/selection.tsv') ?? '', '\n')) {
 		let p = split(line, '\t');
 		if (length(p) < 2 || shown[p[0]]) continue;
+		if (uciget('trusttunnel.' + p[0]) != 'group' ||
+		    uciget('trusttunnel.' + p[0] + '.enabled') == '0') continue;
 		shown[p[0]] = true;
 		let sel = selected[p[0]] ?? { server: p[1] };
 		push(groups, {
@@ -510,8 +517,10 @@ return {
 			let rec = records();
 			let rs = routing_status();
 			let multi = uciget('trusttunnel.main.multi_server') == '1';
-			let mr = multi ? multi_runtime() : { servers: [], groups: [] };
 			let running = sh('/etc/init.d/trusttunnel running').code == 0;
+			// Do not present cached runtime files as live subscriptions after the
+			// service has stopped. The configured profiles remain on Settings.
+			let mr = multi && running ? multi_runtime() : { servers: [], groups: [], switches: [] };
 			// Устройство берётся из ЖИВОГО состояния, а не из настроек: его создаёт
 			// клиент и имя выбирает сам. null означает "клиент устройства пока не
 			// создал" — и это честнее, чем показывать имя из конфига, которого в

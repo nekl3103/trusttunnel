@@ -515,6 +515,7 @@ return view.extend({
 	},
 
 	render: function(data) {
+		var self = this;
 		var geositeCatalog = data[1] || { items: [] };
 		var hostHints = data[2] || {};
 		var m, s, o;
@@ -570,7 +571,12 @@ return view.extend({
 		o = s.option(form.Value, 'name', _('Name')); o.rmempty = false; o.modalonly = true;
 		o = s.option(form.Button, '_import', _('Configuration'));
 		o.inputtitle = _('Import…'); o.inputstyle = 'action';
-		o.onclick = ui.createHandlerFn(this, 'handleImport'); o.modalonly = true;
+		// form.Button calls onclick(event, sectionID). Wrapping handleImport in
+		// createHandlerFn here discarded sectionID and passed the click event as
+		// the UCI target, so importing into a newly added server could not save
+		// any fields. Keep the real GridSection section identifier.
+		o.onclick = function(ev, sectionID) { return self.handleImport(sectionID); };
+		o.modalonly = true;
 		o = s.option(form.DynamicList, 'address', _('Addresses'));
 		o.placeholder = '203.0.113.10:443'; o.rmempty = false; o.modalonly = true;
 		o = s.option(form.Value, 'hostname', _('TLS host name')); o.rmempty = false; o.modalonly = true;
