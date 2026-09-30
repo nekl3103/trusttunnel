@@ -3,16 +3,17 @@
 'require rpc';
 'require dom';
 'require ui';
+'require uci';
 
-var callDiagnose = rpc.declare({ object: 'luci.trusttunnel', method: 'diagnose' });
+var callDiagnose = rpc.declare({ object: 'luci.trusttunnel', method: 'diagnose', params: [ 'server' ] });
 var callPing = rpc.declare({
 	object: 'luci.trusttunnel', method: 'ping', params: [ 'target' ]
 });
-var callProbe = rpc.declare({ object: 'luci.trusttunnel', method: 'probe' });
+var callProbe = rpc.declare({ object: 'luci.trusttunnel', method: 'probe', params: [ 'server' ] });
 var callCheckDomain = rpc.declare({
 	object: 'luci.trusttunnel', method: 'check_domain', params: [ 'domain' ]
 });
-var callSpeedStart = rpc.declare({ object: 'luci.trusttunnel', method: 'speedtest_start' });
+var callSpeedStart = rpc.declare({ object: 'luci.trusttunnel', method: 'speedtest_start', params: [ 'server' ] });
 var callSpeedStatus = rpc.declare({ object: 'luci.trusttunnel', method: 'speedtest_status' });
 var callSpeedStop = rpc.declare({ object: 'luci.trusttunnel', method: 'speedtest_stop' });
 
@@ -373,10 +374,10 @@ return view.extend({
 		return parts;
 	},
 
-	handleDiagnose: function(container) {
+	handleDiagnose: function(container, server) {
 		dom.content(container, E('p', { 'class': 'spinning' },
 			_('Running checks — this takes a few seconds…')));
-		return callDiagnose().then(function(res) {
+		return callDiagnose(server.value).then(function(res) {
 			dom.content(container, this.renderDiagnose(res));
 		}.bind(this)).catch(function(e) {
 			// catch обязателен: без него отклонённый вызов — таймаут ubus,
@@ -389,9 +390,9 @@ return view.extend({
 		});
 	},
 
-	handlePing: function(container) {
+	handlePing: function(container, server) {
 		dom.content(container, E('p', { 'class': 'spinning' }, _('Pinging…')));
-		return callPing('').then(function(res) {
+		return callPing(server.value === 'auto' ? '' : server.value).then(function(res) {
 			if (res.error)
 				return dom.content(container, E('p', {}, res.error));
 			var rows = (res.results || []).map(function(r) {
@@ -419,9 +420,9 @@ return view.extend({
 		});
 	},
 
-	handleProbe: function(container) {
+	handleProbe: function(container, server) {
 		dom.content(container, E('p', { 'class': 'spinning' }, _('Checking…')));
-		return callProbe().then(function(res) {
+		return callProbe(server.value).then(function(res) {
 			dom.content(container, E('table', { 'class': 'table' }, [
 				row(_('Through the tunnel'), res.tunnel.ip
 					? E('code', {}, res.tunnel.ip)
@@ -533,7 +534,7 @@ return view.extend({
 		ctx.start.disabled = true;
 		ctx.status.textContent = _('Starting…');
 		dom.content(ctx.results, []);
-		return callSpeedStart().then(function(res) {
+		return callSpeedStart(ctx.server.value).then(function(res) {
 			if (res.error) {
 				ctx.status.textContent = res.error;
 				ctx.start.disabled = false;
@@ -579,8 +580,19 @@ return view.extend({
 
 
 
+	load: function() {
+		return uci.load('trusttunnel');
+	},
+
 	render: function() {
 		var self = this;
+		var server = E('select', { 'class': 'cbi-input-select' }, [
+			E('option', { 'value': 'auto' }, _('Automatic — best available server'))
+		]);
+		uci.sections('trusttunnel', 'server', function(s) {
+			if (s.enabled !== '0')
+				server.appendChild(E('option', { 'value': s['.name'] }, s.name || s['.name']));
+		});
 		var diagBox = E('div', { 'style': 'margin-top:1em' },
 			E('p', { 'class': 'spinning' }, _('Running checks — this takes a few seconds…')));
 		var pingBox = E('div', {});
@@ -588,6 +600,7 @@ return view.extend({
 		var domainBox = E('div', {});
 
 		var speed = {
+			server: server,
 			gauge: makeGauge(),
 			status: E('p', { 'style': 'text-align:center;min-height:1.5em;margin:.3em 0' }, ''),
 			results: E('div', {}),
@@ -615,7 +628,7 @@ return view.extend({
 		// Проверка запускается сразу при открытии: на эту вкладку заходят
 		// именно за тем, чтобы увидеть состояние, и лишний щелчок ничего не
 		// добавляет. Кнопка ниже — для повторного прогона после исправлений.
-		this.handleDiagnose(diagBox);
+		this.handleDiagnose(diagBox, server);
 
 		// Enter в поле домена делает то же, что кнопка: набрать домен и нажать
 		// Enter — естественнее, чем тянуться мышью, а инструментом пользуются
@@ -629,12 +642,18 @@ return view.extend({
 
 		return E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('Diagnostics')),
+			E('div', { 'class': 'cbi-section' }, [
+				E('label', { 'style': 'display:flex;align-items:center;gap:1em;flex-wrap:wrap' }, [
+					E('strong', {}, _('Server to test')),
+					server
+				])
+			]),
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('p', {}, _('Checks the whole chain — configuration, prerequisites, service, kernel state, lists and network — and says what to do about anything it finds.')),
 				E('button', {
 					'class': 'cbi-button cbi-button-action',
-					'click': function() { return self.handleDiagnose(diagBox); }
+					'click': function() { return self.handleDiagnose(diagBox, server); }
 				}, _('Check again')),
 				diagBox
 			]),
@@ -661,7 +680,7 @@ return view.extend({
 				E('p', {}, _('Loss and round-trip time for every configured address.')),
 				E('button', {
 					'class': 'cbi-button cbi-button-action',
-					'click': ui.createHandlerFn(this, 'handlePing', pingBox)
+					'click': ui.createHandlerFn(this, 'handlePing', pingBox, server)
 				}, _('Ping')),
 				pingBox
 			]),
@@ -678,7 +697,7 @@ return view.extend({
 				E('p', {}, _('Shows the address seen through the tunnel next to the one seen directly. The same address in both means traffic is not using the tunnel.')),
 				E('button', {
 					'class': 'cbi-button cbi-button-action',
-					'click': ui.createHandlerFn(this, 'handleProbe', probeBox)
+					'click': ui.createHandlerFn(this, 'handleProbe', probeBox, server)
 				}, _('Compare')),
 				probeBox
 			])

@@ -2,8 +2,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-trusttunnel
-PKG_VERSION:=1.0.13
-PKG_RELEASE:=1
+PKG_VERSION:=1.1.0
+PKG_RELEASE:=14
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=TrustTunnelOpenWrt contributors
 
@@ -13,7 +13,7 @@ LUCI_DESCRIPTION:=Runs the TrustTunnel client on OpenWrt and routes selected \
 LUCI_DEPENDS:=+luci-base +kmod-tun +ip-full +curl +ca-bundle +ucode-mod-math
 # Иначе luci.mk подставит адрес самого LuCI, и `apk info` отправлял бы за
 # поддержкой не туда.
-LUCI_URL:=https://github.com/NooBiToo/TrustTunnelOpenWrt
+LUCI_URL:=https://github.com/nekl3103/trusttunnel
 LUCI_PKGARCH:=all
 
 # Без этого объявления обновление пакета ЗАТРЁТ /etc/config/trusttunnel
@@ -62,6 +62,12 @@ define Build/Compile
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/fetch-lists
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/gen-config
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/gen-lists
+	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/geosite-sync
+	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/multi-gen-config
+	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/multi-client
+	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/multi-manager
+	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/multi-watch
+	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/secret-store
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/normalize
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/routing
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/speedtest

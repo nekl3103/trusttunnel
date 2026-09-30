@@ -15,6 +15,9 @@ var callVersions = rpc.declare({
 var callLog = rpc.declare({
 	object: 'luci.trusttunnel', method: 'log', params: [ 'lines' ]
 });
+var callOverride = rpc.declare({
+	object: 'luci.trusttunnel', method: 'multi_override', params: [ 'group', 'server', 'duration' ]
+});
 
 // Эта страница отвечает на ОДИН вопрос: работает или нет. Раньше здесь была
 // таблица из двенадцати строк — устройство, ip rule, таблица маршрутизации,
@@ -50,6 +53,14 @@ function verdict(st) {
 			    detail: _('Press Start and read the client log below.') }
 			: { level: 'info', head: _('The service is off'),
 			    detail: _('Press Start to run it now, or turn on "Start on boot" in Settings.') };
+
+	if (st.multi_server) {
+		var up = (st.servers || []).filter(function(s) { return s.state === 'up'; }).length;
+		if (!up)
+			return { level: 'danger', head: _('No server is available'),
+				detail: _('Check the server configurations and the client log below.') };
+		return { level: 'success', head: _('Automatic routing is working'), detail: '' };
+	}
 
 	if (!st.device_up)
 		return { level: 'warning',
@@ -93,6 +104,34 @@ function fmtAge(ts) {
 	if (d < 3600) return Math.floor(d / 60) + ' ' + _('min ago');
 	if (d < 86400) return Math.floor(d / 3600) + ' ' + _('h ago');
 	return Math.floor(d / 86400) + ' ' + _('days ago');
+}
+
+function reasonText(reason) {
+	return ({ fastest: _('самый быстрый'), stable: _('без переключения'), manual: _('задан вручную'),
+		override: _('временный выбор'), primary: _('основной сервер'), balanced: _('распределение нагрузки'),
+		unavailable: _('нет доступного сервера') })[reason] || reason || '—';
+}
+
+function fmtSpeed(bps) {
+	if (!bps) return _('ещё не измерялась');
+	return (bps * 8 / 1000000).toFixed(1) + ' Мбит/с';
+}
+
+function qualityChart(history) {
+	var data = (history || []).slice(-24).map(function(h) { return h.state === 'up' && h.latency < 999999 ? h.latency : null; });
+	if (!data.length) return '—';
+	var good = data.filter(function(v) { return v != null; });
+	if (!good.length) return '—';
+	var min = Math.min.apply(null, good), max = Math.max.apply(null, good);
+	var points = data.map(function(v, i) {
+		var x = data.length === 1 ? 0 : i * 120 / (data.length - 1);
+		var y = v == null ? 38 : 36 - ((v - min) / Math.max(1, max - min)) * 30;
+		return x.toFixed(1) + ',' + y.toFixed(1);
+	}).join(' ');
+	return E('svg', { 'viewBox': '0 0 120 40', 'width': '120', 'height': '40',
+		'role': 'img', 'aria-label': _('График задержки последних проверок') }, [
+		E('polyline', { 'points': points, 'fill': 'none', 'stroke': '#1976d2', 'stroke-width': '2' })
+	]);
 }
 
 return view.extend({
@@ -145,8 +184,16 @@ return view.extend({
 			rows.push(row(_('State'),
 				E('span', { 'style': 'color:#2e7d32;font-weight:bold' }, _('working'))));
 
-		rows.push(row(_('Mode'), st.mode === 'full'
-			? _('Everything through VPN') : _('Bypass by list')));
+		rows.push(row(_('Mode'), st.multi_server ? _('Automatic multi-server routing') : (st.mode === 'full'
+			? _('Everything through VPN') : _('Bypass by list'))));
+
+		if (st.multi_server) {
+			var up = (st.servers || []).filter(function(s) { return s.state === 'up'; }).length;
+			rows.push(row(_('Servers'), _('%d of %d available').format(up, (st.servers || []).length)));
+			rows.push(row(_('Site groups'), _('%d active').format((st.groups || []).length)));
+			rows.push(row(_('Маршрутизация по устройствам'), st.device_routing ? _('Включена') : _('Выключена')));
+			return E('table', { 'class': 'table' }, rows);
+		}
 
 		if (st.endpoint_hostname)
 			rows.push(row(_('Server'), E('code', {}, st.endpoint_hostname)));
@@ -179,6 +226,79 @@ return view.extend({
 		}
 
 		return E('table', { 'class': 'table' }, rows);
+	},
+
+	renderServers: function(st) {
+		var self = this;
+		var names = {};
+		(st.servers || []).forEach(function(s) { names[s.id] = s.name; });
+		var rows = [ E('tr', { 'class': 'tr table-titles' }, [
+			E('th', { 'class': 'th left' }, _('Server')),
+			E('th', { 'class': 'th left' }, _('State')),
+			E('th', { 'class': 'th left' }, _('Latency')),
+			E('th', { 'class': 'th left' }, _('Скорость')),
+			E('th', { 'class': 'th left' }, _('Надёжность')),
+			E('th', { 'class': 'th left' }, _('Recent quality')),
+			E('th', { 'class': 'th left' }, _('Device'))
+		]) ];
+		(st.servers || []).forEach(function(s) {
+			rows.push(E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left' }, s.name),
+				E('td', { 'class': 'td left' }, s.state === 'up'
+					? E('span', { 'style': 'color:#2e7d32;font-weight:bold' }, _('available'))
+					: E('span', { 'style': 'color:#c62828;font-weight:bold' }, _('unavailable'))),
+				E('td', { 'class': 'td left' }, s.state === 'up' ? s.latency + ' ms' : '—'),
+				E('td', { 'class': 'td left' }, fmtSpeed(s.speed)),
+				E('td', { 'class': 'td left' }, (s.success || 0) + '%'),
+				E('td', { 'class': 'td left', 'title': _('Latest checks') }, qualityChart(s.history)),
+				E('td', { 'class': 'td left' }, s.device || '—')
+			]));
+		});
+		var groups = (st.groups || []).map(function(g) {
+			var select = E('select', { 'class': 'cbi-input-select' }, [ E('option', { 'value': 'auto' }, _('Automatic')) ]);
+			(st.servers || []).forEach(function(s) { select.appendChild(E('option', { 'value': s.id }, s.name)); });
+			select.value = g.override ? g.override.server : 'auto';
+			var apply = E('button', { 'class': 'cbi-button cbi-button-action', 'type': 'button' }, _('Apply for 30 min'));
+			apply.addEventListener('click', function() {
+				apply.disabled = true;
+				callOverride(g.id, select.value, 1800).then(function(res) {
+					if (res.error) throw new Error(res.error);
+					ui.addNotification(null, E('p', {}, _('Routing override applied')), 'info');
+				}).catch(function(e) { ui.addNotification(null, E('p', {}, e.message || String(e)), 'danger'); })
+				.finally(function() { apply.disabled = false; });
+			});
+			return E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left' }, g.name),
+				E('td', { 'class': 'td left' }, g.server ? (names[g.server] || g.server) : _('no healthy server')),
+				E('td', { 'class': 'td left' }, [ reasonText(g.reason || g.strategy),
+					g.check ? E('small', { 'style': 'display:block;opacity:.7' },
+						g.check.state === 'ok' ? _('сайт доступен') : _('контрольный сайт недоступен')) : '' ]),
+				E('td', { 'class': 'td left' }, fmtAge(g.changed)),
+				E('td', { 'class': 'td left' }, [ select, ' ', apply ])
+			]);
+		});
+		var switchRows = (st.switches || []).slice(-10).reverse().map(function(x) {
+			return E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left' }, fmtAge(x.at)),
+				E('td', { 'class': 'td left' }, x.group),
+				E('td', { 'class': 'td left' }, (names[x.from] || x.from || '—') + ' → ' + (names[x.to] || x.to || '—')),
+				E('td', { 'class': 'td left' }, reasonText(x.reason))
+			]);
+		});
+		return E('div', {}, [
+			E('table', { 'class': 'table' }, rows),
+			groups.length ? E('div', { 'style': 'margin-top:1em' }, [ E('h4', {}, _('Group routing')),
+				E('table', { 'class': 'table' }, [ E('tr', { 'class': 'tr table-titles' }, [
+					E('th', { 'class': 'th left' }, _('Group')), E('th', { 'class': 'th left' }, _('Server')),
+					E('th', { 'class': 'th left' }, _('Reason')), E('th', { 'class': 'th left' }, _('Changed')),
+					E('th', { 'class': 'th left' }, _('Temporary override'))
+				]) ].concat(groups)) ]) : '',
+			switchRows.length ? E('div', { 'style': 'margin-top:1em' }, [ E('h4', {}, _('Журнал переключений')),
+				E('table', { 'class': 'table' }, [ E('tr', { 'class': 'tr table-titles' }, [
+					E('th', { 'class': 'th left' }, _('Когда')), E('th', { 'class': 'th left' }, _('Группа')),
+					E('th', { 'class': 'th left' }, _('Переключение')), E('th', { 'class': 'th left' }, _('Причина'))
+				]) ].concat(switchRows)) ]) : ''
+		]);
 	},
 
 	renderVersions: function(v, box) {
@@ -263,6 +383,7 @@ return view.extend({
 		var self = this;
 		var verdictBox = E('div', {}, this.renderVerdict(st));
 		var factsBox = E('div', {}, this.renderFacts(st));
+		var serversBox = E('div', {}, this.renderServers(st));
 		var versionBox = E('div', {}, E('em', {}, _('Checking…')));
 		var logBox = E('pre', {
 			'style': 'max-height:22em;overflow:auto;margin:0'
@@ -285,6 +406,7 @@ return view.extend({
 			return callStatus().then(function(s) {
 				dom.content(verdictBox, self.renderVerdict(s));
 				dom.content(factsBox, self.renderFacts(s));
+				dom.content(serversBox, self.renderServers(s));
 			});
 		}, 10);
 
@@ -339,6 +461,11 @@ return view.extend({
 			]),
 
 			E('div', { 'class': 'cbi-section' }, [ pair ]),
+
+			st.multi_server ? E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Servers and routing')),
+				serversBox
+			]) : '',
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Client log')),

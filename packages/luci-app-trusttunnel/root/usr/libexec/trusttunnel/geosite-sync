@@ -1,0 +1,86 @@
+#!/bin/sh
+set -e
+
+URL=${TT_GEOSITE_PLAIN_URL:-https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml}
+STATE=${TT_STATE_DIR:-/usr/share/trusttunnel}
+CACHE=$STATE/geosite.dat_plain.yml
+LISTSDIR=${TT_LISTS_DIR:-/usr/share/trusttunnel/lists}
+
+download() {
+	mkdir -p "$STATE"
+	tmp="$CACHE.new"
+	rm -f "$tmp"
+	curl -fL --connect-timeout 10 --max-time 90 "$URL" -o "$tmp"
+	[ -s "$tmp" ] && grep -q '^  - name: "' "$tmp" || { rm -f "$tmp"; echo 'invalid geosite catalog' >&2; return 1; }
+	[ -s "$CACHE" ] && cp "$CACHE" "$CACHE.previous"
+	mv "$tmp" "$CACHE"
+	date +%s > "$STATE/geosite.updated"
+}
+
+ensure_cache() {
+	[ -s "$CACHE" ] || download
+}
+
+catalog() {
+	[ "${1:-}" = refresh ] && download || ensure_cache
+	awk '
+		function emit() { if (name != "") print name "\t" total "\t" applied "\t" ignored }
+		/^  - name: "/ {
+			emit(); total=0; applied=0; ignored=0
+			name=$0; sub(/^  - name: "/, "", name); sub(/"$/, "", name); next
+		}
+		/^    length: [0-9]+$/ && name != "" {
+			total=$0; sub(/^    length: /, "", total); next
+		}
+		/^      - "/ && name != "" {
+			r=$0; sub(/^      - "/, "", r); sub(/"$/, "", r)
+			if (r ~ /^(domain|full|ip|cidr):/) applied++; else ignored++
+		}
+		END { emit() }
+	' "$CACHE"
+}
+
+extract_one() {
+	name=$1
+	dest=$LISTSDIR/Geosite/$name.lst
+	cidr=$LISTSDIR/Geosite/$name.cidr
+	meta=$LISTSDIR/Geosite/$name.meta
+	mkdir -p "$LISTSDIR/Geosite"
+	awk -v wanted="$name" -v domains="$dest.new" -v networks="$cidr.new" -v metadata="$meta.new" '
+		function unquote(s) { sub(/^      - "/, "", s); sub(/"$/, "", s); return s }
+		/^  - name: "/ {
+			n=$0; sub(/^  - name: "/, "", n); sub(/"$/, "", n)
+			if (active && n != wanted) exit
+			active=(n == wanted); next
+		}
+		active && /^      - "/ {
+			r=unquote($0)
+			total++
+			if (r ~ /^domain:/) { sub(/^domain:/, "", r); sub(/:@[^:]*$/, "", r); print r > domains; applied++ }
+			else if (r ~ /^full:/) { sub(/^full:/, "", r); sub(/:@[^:]*$/, "", r); print r > domains; applied++ }
+			else if (r ~ /^(ip|cidr):/) { sub(/^(ip|cidr):/, "", r); sub(/:@[^:]*$/, "", r); print r > networks; applied++ }
+			else ignored++
+		}
+		END { print "total=" total > metadata; print "applied=" applied >> metadata; print "ignored=" ignored >> metadata }
+	' "$CACHE"
+	[ -s "$dest.new" ] || [ -s "$cidr.new" ] || { rm -f "$dest.new" "$cidr.new" "$meta.new"; echo "geosite category not found or empty: $name" >&2; return 1; }
+	[ -f "$dest.new" ] && sort -u "$dest.new" -o "$dest.new" || : > "$dest.new"
+	[ -f "$cidr.new" ] && sort -u "$cidr.new" -o "$cidr.new" || : > "$cidr.new"
+	[ -f "$dest" ] && cp "$dest" "$dest.previous"
+	[ -f "$cidr" ] && cp "$cidr" "$cidr.previous"
+	mv "$dest.new" "$dest"; mv "$cidr.new" "$cidr"; mv "$meta.new" "$meta"
+}
+
+sync_selected() {
+	ensure_cache
+	uci -q show trusttunnel | sed -n "s/.*\.source='Geosite\/\([^']*\)\.lst'.*/\1/p" | sort -u |
+	while IFS= read -r name; do
+		[ -n "$name" ] && extract_one "$name"
+	done
+}
+
+case "${1:-sync}" in
+	catalog) catalog "${2:-}" ;;
+	sync) [ -n "${2:-}" ] && LISTSDIR=$2; sync_selected ;;
+	*) echo "usage: geosite-sync {catalog [refresh]|sync [lists-dir]}" >&2; exit 2 ;;
+esac

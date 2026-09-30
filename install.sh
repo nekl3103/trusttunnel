@@ -1,9 +1,9 @@
 #!/bin/sh
 # Установщик luci-app-trusttunnel для OpenWrt 25.12+.
-#   sh -c "$(wget -O - https://raw.githubusercontent.com/NooBiToo/TrustTunnelOpenWrt/main/install.sh)"
+#   sh -c "$(wget -O - https://raw.githubusercontent.com/nekl3103/trusttunnel/main/install.sh)"
 set -e
 
-REPO="${TT_REPO:-NooBiToo/TrustTunnelOpenWrt}"
+REPO="${TT_REPO:-nekl3103/trusttunnel}"
 CLIENT_DIR=/opt/trusttunnel_client
 CLIENT_INSTALLER=https://raw.githubusercontent.com/TrustTunnel/TrustTunnelClient/refs/heads/master/scripts/install.sh
 CLIENT_RELEASE=https://api.github.com/repos/TrustTunnel/TrustTunnelClient/releases/latest

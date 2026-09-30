@@ -68,7 +68,7 @@ stays direct.
 One command on the router:
 
 ```sh
-sh -c "$(wget -O - https://raw.githubusercontent.com/NooBiToo/TrustTunnelOpenWrt/main/install.sh)"
+sh -c "$(wget -O - https://raw.githubusercontent.com/nekl3103/trusttunnel/main/install.sh)"
 ```
 
 What the script does:
@@ -794,16 +794,16 @@ An honest list of what the package does not do, and what to do about it.
 - **Only OpenWrt 25.12 and newer is supported.** The package is built
   around `apk`, which replaced `opkg`; older versions will not be
   supported.
-- **Multiple server profiles and failover between them are not
-  implemented.** One server; multiple addresses for that one server are
-  fine.
+- **Multi-server mode runs one client per enabled profile.** This enables
+  per-group selection and automatic switching, but costs memory; on 256 MB
+  routers keep no more than two or three profiles enabled simultaneously.
 
 ---
 
 ## Updating
 
 ```bash
-sh -c "$(wget -O - https://raw.githubusercontent.com/NooBiToo/TrustTunnelOpenWrt/main/install.sh)"
+sh -c "$(wget -O - https://raw.githubusercontent.com/nekl3103/trusttunnel/main/install.sh)"
 ```
 
 Running the installer again updates both the package and the client

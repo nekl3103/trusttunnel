@@ -3,15 +3,16 @@
 		"description": "Grant access to TrustTunnel configuration and diagnostics",
 		"read": {
 			"ubus": {
+				"luci-rpc": [ "getHostHints" ],
 				"luci.trusttunnel": [
-					"status", "ping", "probe", "check_domain", "catalog", "log", "versions", "diagnose", "speedtest_status"
+					"status", "multi_status", "ping", "probe", "check_domain", "catalog", "geosite_catalog", "log", "versions", "diagnose", "speedtest_status"
 				]
 			},
 			"uci": [ "trusttunnel" ]
 		},
 		"write": {
 			"ubus": {
-				"luci.trusttunnel": [ "service", "import_config", "speedtest_start", "speedtest_stop" ]
+				"luci.trusttunnel": [ "service", "import_config", "speedtest_start", "speedtest_stop", "multi_override", "secret_set" ]
 			},
 			"uci": [ "trusttunnel" ]
 		}

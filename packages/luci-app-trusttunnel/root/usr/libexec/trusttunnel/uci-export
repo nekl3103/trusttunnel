@@ -30,7 +30,7 @@ listopt() {
 	return 0
 }
 
-for o in enabled mode full_exclude_lists log_level; do scalar main "$o"; done
+for o in enabled multi_server health_interval switch_threshold switch_cooldown mode full_exclude_lists log_level; do scalar main "$o"; done
 # endpoint.certificate намеренно НЕ выгружается: PEM многострочный, а значение
 # в records не может содержать перевод строки. Сертификат пишет в отдельный
 # файл init-скрипт и передаёт его gen-config третьим аргументом.
@@ -61,3 +61,15 @@ listopt lists url
 
 listopt domains bypass
 listopt domains direct
+
+# In multi-server mode every group owns its lists. Export them through the
+# legacy aggregate keys as well so the existing secure downloader can fetch
+# and update the files without learning a second records schema.
+config_get_bool _multi main multi_server 0
+if [ "$_multi" = "1" ]; then
+	_group_lists() {
+		_KEY="lists.source"; config_list_foreach "$1" source _emit_one
+		_KEY="lists.subnet"; config_list_foreach "$1" subnet _emit_one
+	}
+	config_foreach _group_lists group
+fi

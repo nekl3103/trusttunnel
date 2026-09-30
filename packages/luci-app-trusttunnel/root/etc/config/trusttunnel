@@ -1,8 +1,14 @@
 config main 'main'
 	option enabled '0'
+	option multi_server '0'
+	option health_interval '10'
+	option stable_health_interval '300'
+	option switch_threshold '15'
+	option switch_cooldown '120'
 	option mode 'selective'
 	option full_exclude_lists '0'
 	option log_level 'info'
+	option device_routing '0'
 
 config endpoint 'endpoint'
 	option hostname ''
@@ -42,3 +48,28 @@ config lists 'lists'
 	option update_interval 'daily'
 
 config domains 'domains'
+
+# Multi-server mode adds named `server` and `group` sections. They are created
+# from LuCI; examples:
+# config server 'finland'
+#     option enabled '1'
+#     option name 'Finland'
+#     option hostname 'vpn.example.com'
+#     list address '203.0.113.10:443'
+#     option username 'user'
+#     option password 'secret'
+#
+# config group 'video'
+#     option enabled '1'
+#     option name 'Video'
+#     option strategy 'auto'
+#     list pool 'finland'
+#     list domain 'youtube.com'
+#
+# Optional per-device routing. When main.device_routing is enabled, only the
+# listed device/group pairs use TrustTunnel; all other traffic stays direct.
+# config device 'phone'
+#     option enabled '1'
+#     option name 'Phone'
+#     option match '192.168.1.20'
+#     list group 'youtube'

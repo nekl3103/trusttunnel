@@ -598,6 +598,71 @@ start_doh_proxy() {
 	logger -t trusttunnel "encrypted DNS proxy listening on 127.0.0.1:$_port"
 }
 
+setup_multi_trust_store() {
+	_multi_ca_required=0
+	_check_multi_ca() {
+		config_get_bool _skip "$1" skip_verification 0
+		config_get _cert "$1" certificate
+		[ "$_skip" = 1 ] || [ -n "$_cert" ] || _multi_ca_required=1
+	}
+	config_foreach _check_multi_ca server
+	[ "$_multi_ca_required" = 0 ] && return 0
+	for _ca in /etc/ssl/cert.pem /etc/ssl/certs/ca-certificates.crt; do
+		[ -s "$_ca" ] && return 0
+	done
+	logger -t trusttunnel "error: a multi-server profile requires certificate verification, but no CA bundle was found"
+	return 1
+}
+
+start_multi_service() {
+	# Multi mode owns its nft table, policy rules and persistent TUN devices.
+	# Remove a possible legacy single-profile attachment when the mode was
+	# changed before this restart.
+	[ -f "$OUTDIR/settings.tsv" ] && "$LIBDIR/routing" down "$OUTDIR/settings.tsv" 2>/dev/null || true
+	unlink_dnsmasq
+	_migrate_secret() { "$LIBDIR/secret-store" migrate "$1" || return 1; }
+	config_foreach _migrate_secret server
+	setup_multi_trust_store || return 1
+
+	if ! "$LIBDIR/multi-manager" prepare; then
+		if [ -s /etc/trusttunnel/last-good.uci ]; then
+			logger -t trusttunnel "warning: new configuration failed; restoring last known working configuration"
+			uci -q revert trusttunnel
+			uci import trusttunnel < /etc/trusttunnel/last-good.uci && uci commit trusttunnel || return 1
+			config_load trusttunnel
+			"$LIBDIR/multi-manager" prepare || { logger -t trusttunnel "error: rollback configuration also failed"; return 1; }
+		else
+			logger -t trusttunnel "error: multi-server preparation failed"
+			return 1
+		fi
+	fi
+
+	while IFS="$(printf '\t')" read -r _id _dev _mark _table _host _port _priority; do
+		[ -n "$_id" ] || continue
+		procd_open_instance "multi_$_id"
+		procd_set_param command "$LIBDIR/multi-client" "$_id" "$_table" "/var/etc/trusttunnel/multi/$_id/client.toml"
+		if [ -s /etc/ssl/certs/ca-certificates.crt ]; then
+			procd_set_param env SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SSL_CERT_DIR=/etc/ssl/certs
+		elif [ -s /etc/ssl/cert.pem ]; then
+			procd_set_param env SSL_CERT_FILE=/etc/ssl/cert.pem
+		fi
+		procd_set_param respawn 3600 5 0
+		procd_set_param stdout 1
+		procd_set_param stderr 1
+		procd_close_instance
+	done < /var/etc/trusttunnel/multi/servers.tsv
+
+	config_get _interval main health_interval 10
+	config_get _stable main stable_health_interval 300
+	procd_open_instance multi_watch
+	procd_set_param command "$LIBDIR/multi-watch" "$_interval" "$_stable"
+	procd_set_param respawn 3600 5 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+	logger -t trusttunnel "multi-server mode started"
+}
+
 start_service() {
 	config_load trusttunnel
 	config_get_bool enabled main enabled 0
@@ -612,6 +677,14 @@ start_service() {
 		abort_restart_cleanup
 		return 1
 	}
+
+	config_get_bool _multi main multi_server 0
+	if [ "$_multi" = "1" ]; then
+		wait_for_wan
+		wait_for_time
+		start_multi_service
+		return $?
+	fi
 
 	setup_trust_store || { abort_restart_cleanup; return 1; }
 	regenerate || {
@@ -691,6 +764,19 @@ start_service() {
 }
 
 stop_service() {
+	# Always clean a previously active multi-mode instance. This is required
+	# when the user switches back to legacy mode before invoking restart.
+	if [ -x "$LIBDIR/multi-manager" ] && [ -d /var/etc/trusttunnel/multi ]; then
+		"$LIBDIR/multi-manager" down || true
+	fi
+	_multi=$(uci -q get trusttunnel.main.multi_server 2>/dev/null)
+	[ -n "$_multi" ] || _multi=0
+	if [ "$_multi" = "1" ]; then
+		[ -f "$OUTDIR/settings.tsv" ] && "$LIBDIR/routing" down "$OUTDIR/settings.tsv" 2>/dev/null || true
+		unlink_dnsmasq
+		return 0
+	fi
+
 	# restart() ставит _TT_RESTARTING перед stop+start. Между stop_service и
 	# start_service публикуемое содержимое dnsmasq.conf не меняется (та же
 	# UCI-конфигурация), так что снимать файл и перезапускать dnsmasq здесь,
@@ -798,7 +884,7 @@ change_class() {
 			printf 'restart_full\n' ;;
 		# Выключение службы обязано снять маршрутизацию: иначе помеченный
 		# трафик остался бы уходить в blackhole при выключенном обходе.
-		main.enabled)
+		main.enabled|main.multi_server)
 			printf 'restart_full\n' ;;
 		# Тип резолвера для списков решает, поднимать ли doh-инстанс, а его
 		# адрес и порт — аргументы команды инстанса. И то и другое procd
@@ -811,6 +897,7 @@ change_class() {
 		# запуске. endpoint.* перечислен шаблоном намеренно: в этой секции
 		# нет и не может появиться значения, не попадающего в конфиг клиента.
 		# Настройки исключений и буферов TCP самого клиента — тоже client.toml.
+		main.health_interval|main.switch_threshold|main.switch_cooldown|\
 		main.mode|main.full_exclude_lists|main.log_level|network.mtu|\
 		network.early_ack|network.preresolve|network.preresolve_max|\
 		network.scannable_ports|network.tcp_recv_buf|network.tcp_send_buf|\
@@ -990,6 +1077,15 @@ update_lists() {
 	# всем — ровно та экспозиция, которую regenerate уже закрыл.
 	umask 077
 	mkdir -p "$OUTDIR" "$LISTSDIR"
+	config_load trusttunnel
+	config_get_bool _multi main multi_server 0
+	if [ "$_multi" = 1 ]; then
+		"$LIBDIR/geosite-sync" sync "$LISTSDIR" || return 1
+		config_get_bool _en main enabled 0
+		if [ "$_en" = 1 ]; then "$LIBDIR/multi-manager" prepare || return 1; fi
+		date +%s > "$LISTSDIR/../lists.updated"
+		return 0
+	fi
 	"$LIBDIR/uci-export" > "$RECORDS.new" || { rm -f "$RECORDS.new"; return 1; }
 	mv "$RECORDS.new" "$RECORDS"
 	"$LIBDIR/fetch-lists" "$RECORDS" "$LISTSDIR"
@@ -1040,6 +1136,8 @@ update_lists_cron() {
 	config_load trusttunnel
 	config_get_bool _auto lists auto_update 1
 	[ "$_auto" = "1" ] || return 0
+	config_get _interval lists update_interval daily
+	[ "$_interval" != weekly ] || [ "$(date +%u)" = 1 ] || return 0
 	update_lists
 }
 

@@ -1,0 +1,601 @@
+#!/bin/sh
+# Multi-server orchestration: one persistent TUN per enabled server and one
+# nftables set per site group. Groups can pin a server or select the fastest
+# healthy member of a pool.
+set -e
+
+# OpenWrt functions are absent on the development host and replaced by tests.
+# shellcheck disable=SC1090
+. "${TT_FUNCTIONS:-/lib/functions.sh}"
+
+LIBDIR=${TT_LIBDIR:-/usr/libexec/trusttunnel}
+OUTDIR=${TT_MULTI_OUT:-/var/etc/trusttunnel/multi}
+LISTSDIR=${TT_LISTS_DIR:-/usr/share/trusttunnel/lists}
+IP=${TT_IP:-ip}
+NFT=${TT_NFT:-nft}
+CLIENT=${TT_CLIENT:-/opt/trusttunnel_client/trusttunnel_client}
+DNSMASQ_INIT=${TT_DNSMASQ_INIT:-/etc/init.d/dnsmasq}
+REQUIRE_DEVICE=${TT_REQUIRE_DEVICE:-1}
+TABLE_NAME=trusttunnel_multi
+SELECTION=$OUTDIR/selection.tsv
+HEALTH=$OUTDIR/health.tsv
+HISTORY=$OUTDIR/history.tsv
+OVERRIDES=$OUTDIR/overrides.tsv
+SWITCH_HISTORY=$OUTDIR/switch-history.tsv
+GROUP_HEALTH=$OUTDIR/group-health.tsv
+SPEEDSTAMP=$OUTDIR/speed.checked
+LOCKDIR=${TT_LOCKDIR:-$OUTDIR/.lock}
+RUN_SITE_CHECKS=0
+
+log() { logger -t trusttunnel-multi "$*" 2>/dev/null || echo "$*" >&2; }
+nft_check_file() {
+	# Older nft and lightweight test doubles may not implement --check. Apply
+	# validation when the installed command advertises it by accepting an
+	# empty ruleset; otherwise retain the atomic apply path.
+	$NFT -c -f /dev/null >/dev/null 2>&1 || return 0
+	$NFT -c -f "$1" >/dev/null 2>&1
+}
+slug() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_' | cut -c1-20; }
+host_of() {
+	case "$1" in
+		\[*\]:*) printf '%s' "$1" | sed -e 's/^\[//' -e 's/\]:.*$//' ;;
+		*:*:*) printf '%s' "$1" ;;
+		*:*) printf '%s' "${1%:*}" ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+port_of() { case "$1" in \[*\]:*|*:*) printf '%s' "${1##*:}";; *) printf 443;; esac; }
+
+lan_set() {
+	config_get _devs network lan_devices
+	[ -n "${_devs:-}" ] || _devs=$(uci -q get network.lan.device 2>/dev/null || true)
+	[ -n "${_devs:-}" ] || _devs=br-lan
+	printf '%s\n' "$_devs" | tr ' ' '\n' | awk '
+		NF { items[n++] = "\"" $0 "\"" }
+		END { printf "{ "; for (i = 0; i < n; i++) printf "%s%s", (i ? ", " : ""), items[i]; printf " }" }
+	'
+}
+
+append_server() {
+	config_get_bool enabled "$1" enabled 1
+	# Assigned indirectly by config_get_bool.
+	# shellcheck disable=SC2154
+	[ "$enabled" = 1 ] || return 0
+	_servers="${_servers}${_servers:+ }$1"
+}
+append_group() {
+	config_get_bool enabled "$1" enabled 1
+	[ "$enabled" = 1 ] || return 0
+	_groups="${_groups}${_groups:+ }$1"
+}
+append_device() {
+	config_get_bool enabled "$1" enabled 1
+	[ "$enabled" = 1 ] || return 0
+	_devices="${_devices}${_devices:+ }$1"
+}
+load_config() {
+	config_load trusttunnel
+	_servers=""; _groups=""; _devices=""
+	config_foreach append_server server
+	config_foreach append_group group
+	config_foreach append_device device
+	config_get_bool DEVICE_ROUTING main device_routing 0
+}
+
+first_address=""
+take_first() { [ -n "$first_address" ] || first_address="$1"; }
+server_address() { first_address=""; config_list_foreach "$1" address take_first; printf '%s' "$first_address"; }
+
+server_line() {
+	id=$1; idx=$2
+	dev="-"
+	mark=$((0x9600 + idx))
+	table=$((900 + idx))
+	addr=$(server_address "$id")
+	config_get priority "$id" priority 0
+	printf '%s\t%s\t0x%x\t%s\t%s\t%s\t%s\n' "$id" "$dev" "$mark" "$table" "$(host_of "$addr")" "$(port_of "$addr")" "$priority"
+}
+
+write_servers() {
+	: > "$OUTDIR/servers.tsv"
+	idx=1
+	for id in $_servers; do
+		server_line "$id" "$idx" >> "$OUTDIR/servers.tsv"
+		idx=$((idx + 1))
+	done
+}
+
+server_field() { awk -F '\t' -v id="$1" -v n="$2" '$1==id {print $n; exit}' "$OUTDIR/servers.tsv"; }
+
+measure_server() {
+	id=$1; host=$(server_field "$id" 5); port=$(server_field "$id" 6)
+	[ -n "$host" ] || { printf 999999; return; }
+	if command -v tcping >/dev/null 2>&1; then
+		_v=$(tcping -p "$port" -c 1 -t 2 "$host" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -1)
+	elif command -v curl >/dev/null 2>&1; then
+		case "$host" in *:*) target="https://[$host]:$port/";; *) target="https://$host:$port/";; esac
+		_seconds=$(curl -k -sS -o /dev/null --connect-timeout 2 --max-time 2 -w '%{time_connect}' "$target" 2>/dev/null || true)
+		_v=$(awk -v seconds="${_seconds:-0}" 'BEGIN { if (seconds > 0) printf "%.0f", seconds * 1000 }')
+	else
+		_v=$(ping -c 1 -W 2 "$host" 2>/dev/null | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -1)
+	fi
+	[ -n "${_v:-}" ] || _v=999999
+	printf '%s' "${_v%.*}"
+}
+
+measure_tunnel() {
+	id=$1
+	[ -s "$OUTDIR/$id/device" ] || { printf 999999; return; }
+	dev=$(cat "$OUTDIR/$id/device")
+	_seconds=$(curl -4 -fsS -o /dev/null --interface "$dev" --connect-timeout 3 --max-time 6 \
+		-w '%{time_starttransfer}' https://api.ipify.org 2>/dev/null || true)
+	_v=$(awk -v seconds="${_seconds:-0}" 'BEGIN { if (seconds > 0) printf "%.0f", seconds * 1000 }')
+	[ -n "${_v:-}" ] || _v=999999
+	printf '%s' "${_v%.*}"
+}
+
+measure_speed() {
+	id=$1
+	[ -s "$OUTDIR/$id/device" ] || { printf 0; return; }
+	dev=$(cat "$OUTDIR/$id/device")
+	_bps=$(curl -4 -fsS -o /dev/null --interface "$dev" --connect-timeout 3 --max-time 12 \
+		-w '%{speed_download}' 'https://speed.cloudflare.com/__down?bytes=262144' 2>/dev/null || true)
+	printf '%.0f' "${_bps:-0}" 2>/dev/null || printf 0
+}
+
+health_field() { [ -f "$HEALTH" ] || return 0; awk -F '\t' -v id="$1" -v n="$2" '$1==id {print $n; exit}' "$HEALTH" 2>/dev/null || true; }
+
+refresh_health() {
+	: > "$HEALTH.new"
+	: > "$HISTORY.current"
+	now=$(date +%s)
+	last_speed=0; [ -f "$SPEEDSTAMP" ] && last_speed=$(cat "$SPEEDSTAMP")
+	case "$last_speed" in ''|*[!0-9]*) last_speed=0;; esac
+	do_speed=0; [ "$((now - last_speed))" -ge 1800 ] && do_speed=1
+	for id in $_servers; do
+		endpoint_latency=$(measure_server "$id")
+		device_ok=1
+		device="-"
+		if [ "$REQUIRE_DEVICE" = 1 ]; then
+			device_ok=0
+			if [ -s "$OUTDIR/$id/device" ]; then
+				device=$(cat "$OUTDIR/$id/device")
+				$IP link show dev "$device" >/dev/null 2>&1 && device_ok=1
+			fi
+		fi
+		tunnel_latency=999999
+		if [ "$REQUIRE_DEVICE" = 0 ]; then tunnel_latency=$endpoint_latency
+		elif [ "$device_ok" = 1 ]; then tunnel_latency=$(measure_tunnel "$id")
+		fi
+		old_score=$(health_field "$id" 6); old_failures=$(health_field "$id" 7)
+		old_speed=$(health_field "$id" 9); old_success=$(health_field "$id" 10)
+		case "$old_score" in ''|*[!0-9]*) old_score=0;; esac
+		case "$old_failures" in ''|*[!0-9]*) old_failures=0;; esac
+		case "$old_speed" in ''|*[!0-9]*) old_speed=0;; esac
+		case "$old_success" in ''|*[!0-9]*) old_success=100;; esac
+		if [ "$endpoint_latency" -lt 999999 ] && [ "$tunnel_latency" -lt 999999 ] && [ "$device_ok" = 1 ]; then
+			state=up; loss=0; failures=0
+			success=$(((old_success * 9 + 100) / 10))
+			raw_score=$((endpoint_latency + tunnel_latency))
+			[ "$old_score" -gt 0 ] && [ "$old_score" -lt 999999 ] && score=$(((old_score * 3 + raw_score) / 4)) || score=$raw_score
+			latency=$tunnel_latency
+		else
+			state=down; loss=100; failures=$((old_failures + 1)); latency=999999; score=999999
+			success=$((old_success * 9 / 10))
+		fi
+		speed=$old_speed
+		[ "$do_speed" = 1 ] && [ "$state" = up ] && speed=$(measure_speed "$id")
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$state" "$latency" "$loss" "$now" "$score" "$failures" "$endpoint_latency" "$speed" "$success" >> "$HEALTH.new"
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$id" "$state" "$latency" "$loss" "$score" "$device" >> "$HISTORY.current"
+	done
+	mv "$HEALTH.new" "$HEALTH"
+	: > "$HISTORY.new"
+	[ -f "$HISTORY" ] && cat "$HISTORY" >> "$HISTORY.new"
+	cat "$HISTORY.current" >> "$HISTORY.new"
+	tail -n 600 "$HISTORY.new" > "$HISTORY.trim"
+	mv "$HISTORY.trim" "$HISTORY"
+	rm -f "$HISTORY.new" "$HISTORY.current"
+	if [ "$do_speed" = 1 ]; then printf '%s\n' "$now" > "$SPEEDSTAMP"; fi
+}
+
+pool=""
+add_pool() { pool="${pool}${pool:+ }$1"; }
+choose_server() {
+	group=$1
+	config_get strategy "$group" strategy auto
+	config_get fixed "$group" server
+	now=$(date +%s); CHOOSE_REASON=fastest; CHOOSE_SCORE=999999
+	if [ -f "$OVERRIDES" ]; then
+		override=$(awk -F '\t' -v group="$group" -v now="$now" '$1==group && ($3==0 || $3>now) {print $2; exit}' "$OVERRIDES")
+		if [ -n "$override" ]; then
+			if [ "$override" = auto ]; then CHOOSE_REASON=automatic; else
+				CHOOSE_REASON=override; CHOOSE_SCORE=$(health_field "$override" 6); printf '%s\t%s\t%s' "$override" "$CHOOSE_REASON" "$CHOOSE_SCORE"; return
+			fi
+		fi
+	fi
+	# Assigned indirectly by config_get.
+	# shellcheck disable=SC2154
+	if [ "$strategy" = manual ] && [ -n "$fixed" ]; then
+		CHOOSE_REASON=manual; CHOOSE_SCORE=$(health_field "$fixed" 6)
+		[ -n "$(server_field "$fixed" 3)" ] && printf '%s\t%s\t%s' "$fixed" "$CHOOSE_REASON" "$CHOOSE_SCORE"
+		return
+	fi
+	pool=""; config_list_foreach "$group" pool add_pool
+	[ -n "$pool" ] || pool=$_servers
+	config_get metric "$group" metric latency
+	config_get primary "$group" primary
+	if [ "$strategy" = priority ] && [ -n "$primary" ] && [ "$(health_field "$primary" 2)" = up ]; then
+		CHOOSE_REASON=primary; CHOOSE_SCORE=$(health_field "$primary" 6); printf '%s\t%s\t%s' "$primary" "$CHOOSE_REASON" "$CHOOSE_SCORE"; return
+	fi
+	best=""; best_score=99999999
+	healthy=""
+	for id in $pool; do
+		if [ -f "$GROUP_HEALTH" ]; then
+			gh=$(awk -F '\t' -v g="$group" -v id="$id" '$1==g && $2==id {print $3 " " $5; exit}' "$GROUP_HEALTH")
+			gh_state=${gh%% *}; gh_at=${gh##* }
+			case "$gh_at" in ''|*[!0-9]*) gh_at=0;; esac
+			[ "$gh_state" = fail ] && [ "$((now - gh_at))" -lt 900 ] && continue
+		fi
+		lat=$(awk -F '\t' -v id="$id" '$1==id && $2=="up" {print ($6 ? $6 : $3); exit}' "$HEALTH")
+		[ -n "$lat" ] || continue
+		healthy="${healthy}${healthy:+ }$id"
+		prio=$(server_field "$id" 7); case "$prio" in ''|*[!0-9]*) prio=0;; esac
+		case "$metric" in
+			speed)
+			spd=$(health_field "$id" 9); case "$spd" in ''|*[!0-9]*) spd=0;; esac
+			[ "$spd" -gt 0 ] && score=$((100000000 / spd + prio)) || score=$((lat + prio))
+			;;
+			reliability)
+			success=$(health_field "$id" 10); case "$success" in ''|*[!0-9]*) success=0;; esac
+			score=$(((100 - success) * 10000 + lat + prio))
+			;;
+			*) score=$((lat + prio));;
+		esac
+		if [ "$score" -lt "$best_score" ]; then best=$id; best_score=$score; fi
+	done
+	if [ "$strategy" = balanced ] && [ -n "$healthy" ]; then
+		count=$(printf '%s\n' $healthy | wc -l | tr -d ' ')
+		hash=$(printf '%s' "$group" | cksum | cut -d' ' -f1)
+		wanted=$((hash % count + 1))
+		best=$(printf '%s\n' $healthy | sed -n "${wanted}p")
+		best_score=$(health_field "$best" 6); CHOOSE_REASON=balanced
+	fi
+	current=""; changed=0
+	if [ -f "$SELECTION" ]; then
+		current=$(awk -F '\t' -v group="$group" '$1==group && $2!="-" {print $2; exit}' "$SELECTION")
+		changed=$(awk -F '\t' -v group="$group" '$1==group {print $3; exit}' "$SELECTION")
+	fi
+	case "$changed" in ''|*[!0-9]*) changed=0;; esac
+	if [ "$strategy" != balanced ] && [ -n "$best" ] && [ -n "$current" ] && [ "$current" != "$best" ]; then
+		current_lat=$(awk -F '\t' -v id="$current" '$1==id && $2=="up" {print ($6 ? $6 : $3); exit}' "$HEALTH")
+		if [ -n "$current_lat" ]; then
+			current_prio=$(server_field "$current" 7); case "$current_prio" in ''|*[!0-9]*) current_prio=0;; esac
+			current_score=$((current_lat + current_prio))
+			config_get threshold "$group" switch_threshold
+			config_get cooldown "$group" switch_cooldown
+			[ -n "$threshold" ] || config_get threshold main switch_threshold 15
+			[ -n "$cooldown" ] || config_get cooldown main switch_cooldown 120
+			case "$threshold" in ''|*[!0-9]*) threshold=15;; esac
+			case "$cooldown" in ''|*[!0-9]*) cooldown=120;; esac
+			now=$(date +%s)
+			if [ "$best_score" -ge "$((current_score - threshold))" ] || [ "$((now - changed))" -lt "$cooldown" ]; then
+				best=$current; best_score=$current_score; CHOOSE_REASON=stable
+			fi
+		fi
+	fi
+	CHOOSE_SCORE=$best_score
+	printf '%s\t%s\t%s' "$best" "$CHOOSE_REASON" "$CHOOSE_SCORE"
+}
+
+route_chain() { printf 'r_%s' "$(slug "$1")"; }
+group_set() { printf 'g_%s%s' "$(slug "$1")" "$2"; }
+
+device_has_group() {
+	_device=$1; _wanted_group=$2; _device_group_found=0
+	_device_group_match() { [ "$1" = "$_wanted_group" ] && _device_group_found=1; }
+	config_list_foreach "$_device" group _device_group_match
+	[ "$_device_group_found" = 1 ]
+}
+
+device_match_expr() {
+	_match=$1
+	if printf '%s\n' "$_match" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'; then
+		printf 'ether saddr %s' "$(printf '%s' "$_match" | tr 'A-F' 'a-f')"
+	elif printf '%s\n' "$_match" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$'; then
+		printf 'ip saddr %s' "$_match"
+	elif printf '%s\n' "$_match" | grep -Eq '^[0-9A-Fa-f:]+(/[0-9]{1,3})?$'; then
+		printf 'ip6 saddr %s' "$_match"
+	else
+		return 1
+	fi
+}
+
+emit_device_action() {
+	_group=$1; _chain=$2; _action=$3
+	for _device in $_devices; do
+		device_has_group "$_device" "$_group" || continue
+		config_get _match "$_device" match
+		[ -n "$_match" ] || continue
+		_expr=$(device_match_expr "$_match") || { log "invalid device match ignored: $_match"; continue; }
+		printf 'add rule inet %s %s %s %s\n' "$TABLE_NAME" "$_chain" "$_expr" "$_action" >> "$transaction"
+	done
+}
+
+check_group_target() {
+	group=$1; selected=$2; now=$3
+	config_get url "$group" control_url
+	[ -n "$url" ] || return 0
+	last=0; [ -f "$GROUP_HEALTH" ] && last=$(awk -F '\t' -v g="$group" '$1==g {print $5; exit}' "$GROUP_HEALTH")
+	case "$last" in ''|*[!0-9]*) last=0;; esac
+	[ "$((now - last))" -ge 900 ] || return 0
+	[ -s "$OUTDIR/$selected/device" ] || return 0
+	dev=$(cat "$OUTDIR/$selected/device")
+	seconds=$(curl -4 -k -fsS -I -o /dev/null --interface "$dev" --connect-timeout 3 --max-time 6 -w '%{time_total}' "$url" 2>/dev/null || true)
+	ms=$(awk -v s="${seconds:-0}" 'BEGIN { if (s > 0) printf "%.0f", s * 1000; else print 0 }')
+	[ "$ms" -gt 0 ] && state=ok || state=fail
+	: > "$GROUP_HEALTH.new"
+	[ -f "$GROUP_HEALTH" ] && awk -F '\t' -v g="$group" '$1!=g' "$GROUP_HEALTH" >> "$GROUP_HEALTH.new"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$group" "$selected" "$state" "$ms" "$now" "$url" >> "$GROUP_HEALTH.new"
+	mv "$GROUP_HEALTH.new" "$GROUP_HEALTH"
+}
+
+apply_selection() {
+	: > "$SELECTION.new"
+	transaction="$OUTDIR/selection.nft"
+	: > "$transaction"
+	now=$(date +%s)
+	for group in $_groups; do
+		choice=$(choose_server "$group")
+		selected=$(printf '%s' "$choice" | cut -f1)
+		reason=$(printf '%s' "$choice" | cut -f2)
+		selected_score=$(printf '%s' "$choice" | cut -f3)
+		chain=$(route_chain "$group")
+		printf 'flush chain inet %s %s\n' "$TABLE_NAME" "$chain" >> "$transaction"
+		if [ -n "$selected" ]; then
+			mark=$(server_field "$selected" 3)
+			if [ "$DEVICE_ROUTING" = 1 ]; then
+				emit_device_action "$group" "$chain" "meta mark set $mark"
+			else
+				printf 'add rule inet %s %s meta mark set %s\n' "$TABLE_NAME" "$chain" "$mark" >> "$transaction"
+			fi
+			old_server=""; old_changed=0
+			if [ -f "$SELECTION" ]; then
+				old_server=$(awk -F '\t' -v group="$group" '$1==group {print $2; exit}' "$SELECTION")
+				old_changed=$(awk -F '\t' -v group="$group" '$1==group {print $3; exit}' "$SELECTION")
+			fi
+			case "$old_changed" in ''|*[!0-9]*) old_changed=0;; esac
+			[ "$old_server" = "$selected" ] && changed=$old_changed || changed=$now
+			printf '%s\t%s\t%s\t%s\t%s\n' "$group" "$selected" "$changed" "${reason:-fastest}" "${selected_score:-999999}" >> "$SELECTION.new"
+			if [ -n "$old_server" ] && [ "$old_server" != "$selected" ]; then
+				printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$group" "$old_server" "$selected" "${reason:-fastest}" "${selected_score:-999999}" >> "$SWITCH_HISTORY"
+				tail -n 200 "$SWITCH_HISTORY" > "$SWITCH_HISTORY.new"; mv "$SWITCH_HISTORY.new" "$SWITCH_HISTORY"
+			fi
+			if [ "$RUN_SITE_CHECKS" = 1 ]; then check_group_target "$group" "$selected" "$now"; fi
+		else
+			if [ "$DEVICE_ROUTING" = 1 ]; then
+				emit_device_action "$group" "$chain" drop
+			else
+				printf 'add rule inet %s %s drop\n' "$TABLE_NAME" "$chain" >> "$transaction"
+			fi
+			printf '%s\t-\t%s\tunavailable\t999999\n' "$group" "$now" >> "$SELECTION.new"
+		fi
+	done
+	nft_check_file "$transaction" || { log 'selection transaction validation failed'; return 1; }
+	$NFT -f "$transaction"
+	mv "$SELECTION.new" "$SELECTION"
+}
+
+resolve_host() {
+	nslookup "$1" 2>/dev/null | awk '/^Name:/ {a=1; next} a && /^Address/ {sub(/^Address[ \t]*[0-9]*:[ \t]*/, ""); sub(/[ \t].*/, ""); if ($0 !~ /:53$/) print}'
+}
+
+emit_domain() {
+	d=$1; [ -n "$d" ] || return 0
+	printf '%s\n' "$d" | "$LIBDIR/normalize" 2>/dev/null | while IFS= read -r normalized; do
+		printf 'nftset=/%s/4#inet#%s#%s\n' "$normalized" "$TABLE_NAME" "$set4" >> "$OUTDIR/dnsmasq.conf"
+		printf 'nftset=/%s/6#inet#%s#%s\n' "$normalized" "$TABLE_NAME" "$set6" >> "$OUTDIR/dnsmasq.conf"
+	done
+}
+emit_source() {
+	f="$LISTSDIR/$1"; [ -f "$f" ] || { log "list not found: $1"; return 0; }
+	"$LIBDIR/normalize" < "$f" 2>/dev/null | while IFS= read -r d; do emit_domain "$d"; done
+	case "$f" in
+		*.lst) extra="${f%.lst}.cidr"; [ -s "$extra" ] && emit_subnet "${1%.lst}.cidr" ;;
+	esac
+}
+emit_subnet() {
+	f="$LISTSDIR/$1"; [ -f "$f" ] || return 0
+	sed -e 's/#.*//' -e 's/[[:space:]]//g' "$f" | grep -v '^$' | while IFS= read -r c; do
+		case "$c" in
+			*:*) $NFT add element inet "$TABLE_NAME" "$set6" "{ $c }" 2>/dev/null || log "rejected IPv6 subnet: $c";;
+			*) $NFT add element inet "$TABLE_NAME" "$set4" "{ $c }" 2>/dev/null || log "rejected IPv4 subnet: $c";;
+		esac
+	done
+}
+
+dnsmasq_confdir() {
+	_d=$(sed -n 's/^conf-dir=\([^,]*\).*/\1/p' /var/etc/dnsmasq.conf.* 2>/dev/null | head -1)
+	if [ -n "${_d:-}" ]; then printf '%s' "$_d"; return; fi
+	config_load dhcp
+	_cfg=""
+	# Invoked indirectly by config_foreach.
+	# shellcheck disable=SC2329
+	_pick_dnsmasq() { [ -n "$_cfg" ] || _cfg="$1"; }
+	config_foreach _pick_dnsmasq dnsmasq
+	[ -n "$_cfg" ] || { printf /tmp/dnsmasq.d; return; }
+	config_get _d "$_cfg" confdir "/tmp/dnsmasq.$_cfg.d"
+	printf '%s' "${_d%%,*}"
+}
+
+publish_dnsmasq() {
+	_dir=$(dnsmasq_confdir)
+	mkdir -p "$_dir"
+	if dnsmasq --version 2>/dev/null | grep -q 'no-nftset'; then
+		rm -f "$_dir/trusttunnel-multi.conf"
+		log 'dnsmasq has no nftset support; install dnsmasq-full'
+		return 1
+	fi
+	rm -f "$_dir/trusttunnel-multi.conf"
+	cp "$OUTDIR/dnsmasq.conf" "$_dir/trusttunnel-multi.conf"
+	chmod 644 "$_dir/trusttunnel-multi.conf"
+	if [ ! -f "$OUTDIR/dnsmasq.loaded" ] || ! cmp -s "$OUTDIR/dnsmasq.conf" "$OUTDIR/dnsmasq.loaded"; then
+		cp "$OUTDIR/dnsmasq.conf" "$OUTDIR/dnsmasq.loaded"
+		$DNSMASQ_INIT restart >/dev/null 2>&1
+	fi
+}
+
+build_routing() {
+	rules="$OUTDIR/rules.nft"
+	{
+		echo "table inet $TABLE_NAME { }"; echo "delete table inet $TABLE_NAME"; echo "table inet $TABLE_NAME {"
+		echo ' set endpoints4 { type ipv4_addr; flags interval; }'
+		echo ' set endpoints6 { type ipv6_addr; flags interval; }'
+		for group in $_groups; do
+			echo " set $(group_set "$group" 4) { type ipv4_addr; flags interval; auto-merge; }"
+			echo " set $(group_set "$group" 6) { type ipv6_addr; flags interval; auto-merge; }"
+			echo " chain $(route_chain "$group") { }"
+		done
+		echo ' chain prerouting {'
+		echo '  type filter hook prerouting priority mangle; policy accept;'
+		printf '  iifname != %s return\n' "$(lan_set)"
+		echo '  ip daddr @endpoints4 return'; echo '  ip6 daddr @endpoints6 return'
+		echo '  ip daddr { 10.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/3 } return'
+		echo '  ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } return'
+		for group in $_groups; do
+			echo "  ip daddr @$(group_set "$group" 4) jump $(route_chain "$group")"
+			echo '  meta mark != 0 return'
+			echo "  ip6 daddr @$(group_set "$group" 6) jump $(route_chain "$group")"
+			echo '  meta mark != 0 return'
+		done
+			echo ' }'; echo '}'
+	} > "$rules"
+	nft_check_file "$rules" || { log 'routing rules validation failed'; return 1; }
+	$NFT list table inet "$TABLE_NAME" > "$rules.previous" 2>/dev/null || : > "$rules.previous"
+	if ! $NFT -f "$rules"; then
+		[ -s "$rules.previous" ] && $NFT -f "$rules.previous" >/dev/null 2>&1 || true
+		log 'routing update failed; previous rules restored'
+		return 1
+	fi
+
+	_add_endpoint_addr() {
+		resolve_host "$(host_of "$1")" | while IFS= read -r addr; do
+			case "$addr" in
+				*:*) $NFT add element inet "$TABLE_NAME" endpoints6 "{ $addr }" 2>/dev/null || true ;;
+				*)   $NFT add element inet "$TABLE_NAME" endpoints4 "{ $addr }" 2>/dev/null || true ;;
+			esac
+		done
+	}
+	for id in $_servers; do config_list_foreach "$id" address _add_endpoint_addr; done
+
+	: > "$OUTDIR/dnsmasq.conf"
+	for group in $_groups; do
+		set4=$(group_set "$group" 4); set6=$(group_set "$group" 6)
+		config_list_foreach "$group" domain emit_domain || true
+		config_list_foreach "$group" source emit_source || true
+		config_list_foreach "$group" subnet emit_subnet || true
+	done
+	publish_dnsmasq
+}
+
+prepare_servers() {
+	idx=1
+	while IFS="$(printf '\t')" read -r id dev mark table host port priority; do
+		$IP rule del fwmark "$mark" table "$table" 2>/dev/null || true
+		$IP rule add fwmark "$mark" table "$table" priority "$((30900 + idx))"
+		$IP -6 rule del fwmark "$mark" table "$table" 2>/dev/null || true
+		$IP -6 rule add fwmark "$mark" table "$table" priority "$((30900 + idx))"
+		$IP route replace blackhole default table "$table" metric 32767
+		$IP -6 route replace blackhole default table "$table" metric 32767
+		mkdir -p "$OUTDIR/$id"; umask 077
+		"$LIBDIR/multi-gen-config" "$id" > "$OUTDIR/$id/client.toml"
+		idx=$((idx + 1))
+	done < "$OUTDIR/servers.tsv"
+}
+
+ensure_lists() {
+	# Geosite groups are stored as ordinary domain lists after extraction from
+	# the official plain-text companion of geosite.dat. dnsmasq cannot read the
+	# protobuf .dat file itself.
+	if command -v uci >/dev/null 2>&1 && uci -q show trusttunnel | grep -q "\.source='Geosite/"; then
+		"$LIBDIR/geosite-sync" sync "$LISTSDIR"
+	fi
+	_need=0
+	for group in $_groups; do
+		_missing_source() { [ -s "$LISTSDIR/$1" ] || _need=1; }
+		config_list_foreach "$group" source _missing_source
+		config_list_foreach "$group" subnet _missing_source
+	done
+	[ "$_need" = 1 ] || return 0
+	"$LIBDIR/uci-export" > "$OUTDIR/download.tsv"
+	"$LIBDIR/fetch-lists" "$OUTDIR/download.tsv" "$LISTSDIR"
+}
+
+down() {
+	[ -f "$OUTDIR/servers.tsv" ] && while IFS="$(printf '\t')" read -r id dev mark table rest; do
+		$IP rule del fwmark "$mark" table "$table" 2>/dev/null || true
+		$IP -6 rule del fwmark "$mark" table "$table" 2>/dev/null || true
+		$IP route flush table "$table" 2>/dev/null || true
+		$IP -6 route flush table "$table" 2>/dev/null || true
+	done < "$OUTDIR/servers.tsv"
+	$NFT delete table inet "$TABLE_NAME" 2>/dev/null || true
+	_dir=$(dnsmasq_confdir); rm -f "$_dir/trusttunnel-multi.conf"; $DNSMASQ_INIT restart >/dev/null 2>&1 || true
+}
+
+cmd=${1:-status}
+if [ "$cmd" = select ]; then RUN_SITE_CHECKS=1; fi
+locked=0
+case "$cmd" in
+	prepare|select|override)
+		mkdir -p "${LOCKDIR%/*}"
+		tries=0
+		while ! mkdir "$LOCKDIR" 2>/dev/null; do
+			[ "$cmd" = select ] && exit 0
+			tries=$((tries + 1)); [ "$tries" -lt 30 ] || { echo 'another TrustTunnel operation is already running' >&2; exit 1; }
+			sleep 1
+		done
+		locked=1; trap '[ "$locked" = 1 ] && rmdir "$LOCKDIR" 2>/dev/null || true' 0
+		;;
+esac
+load_config
+case "$cmd" in
+	prepare)
+		# _rc is assigned inside the trap body when it runs.
+		# shellcheck disable=SC2154
+		trap '_rc=$?; trap - 0; [ "$locked" = 1 ] && rmdir "$LOCKDIR" 2>/dev/null || true; if [ "$_rc" != 0 ]; then down; fi; exit "$_rc"' 0
+		[ -x "$CLIENT" ] || { echo "$CLIENT is missing" >&2; exit 1; }
+		[ -n "$_servers" ] || { echo 'no enabled server sections' >&2; exit 1; }
+		[ -n "$_groups" ] || { echo 'no enabled group sections' >&2; exit 1; }
+		mkdir -p "$OUTDIR"; write_servers; ensure_lists; prepare_servers; build_routing; refresh_health; apply_selection
+		trap - 0; rmdir "$LOCKDIR" 2>/dev/null || true; locked=0
+		;;
+	select) mkdir -p "$OUTDIR"; [ -f "$OUTDIR/servers.tsv" ] || write_servers; refresh_health; apply_selection ;;
+	override)
+		group=${2:-}; server=${3:-auto}; duration=${4:-1800}
+		[ -n "$group" ] || { echo 'group is required' >&2; exit 2; }
+		case "$duration" in ''|*[!0-9]*) duration=1800;; esac
+		until_ts=0; [ "$server" = auto ] || until_ts=$(($(date +%s) + duration))
+		mkdir -p "$OUTDIR"; : > "$OVERRIDES.new"
+		[ -f "$OVERRIDES" ] && awk -F '\t' -v group="$group" '$1!=group' "$OVERRIDES" >> "$OVERRIDES.new"
+		[ "$server" = auto ] || printf '%s\t%s\t%s\n' "$group" "$server" "$until_ts" >> "$OVERRIDES.new"
+		mv "$OVERRIDES.new" "$OVERRIDES"
+		[ -f "$OUTDIR/servers.tsv" ] || write_servers
+		refresh_health; apply_selection
+		;;
+	down) down ;;
+	save-good)
+		if [ -s "$HEALTH" ] && ! grep -q "$(printf '\tdown\t')" "$HEALTH" &&
+		   [ -s "$SELECTION" ] && ! grep -q "$(printf '\t-\t')" "$SELECTION"; then
+			mkdir -p /etc/trusttunnel; umask 077
+			uci export trusttunnel > /etc/trusttunnel/last-good.uci.new
+			mv /etc/trusttunnel/last-good.uci.new /etc/trusttunnel/last-good.uci
+		fi
+		;;
+	status)
+		[ -f "$HEALTH" ] && cat "$HEALTH"
+		[ -f "$SELECTION" ] && cat "$SELECTION"
+		for id in $_servers; do
+			[ -f "$OUTDIR/$id/device" ] && printf '%s\tdevice\t%s\n' "$id" "$(cat "$OUTDIR/$id/device")"
+		done
+		;;
+	*) echo "usage: multi-manager {prepare|select|override <group> <server|auto> [seconds]|save-good|down|status}" >&2; exit 2;;
+esac

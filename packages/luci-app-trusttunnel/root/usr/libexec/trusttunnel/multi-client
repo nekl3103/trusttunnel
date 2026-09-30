@@ -1,0 +1,104 @@
+#!/bin/sh
+# Start one client, identify the TUN it creates, and attach that device to the
+# policy-routing table assigned to this server. Discovery is serialized so
+# concurrent clients cannot claim each other's interface.
+set -u
+
+id="${1:?usage: multi-client <id> <table> <config>}"
+table="${2:?usage: multi-client <id> <table> <config>}"
+config="${3:?usage: multi-client <id> <table> <config>}"
+
+CLIENT=${TT_CLIENT:-/opt/trusttunnel_client/trusttunnel_client}
+IP=${TT_IP:-ip}
+OUTDIR=${TT_MULTI_OUT:-/var/etc/trusttunnel/multi}
+NETDIR=${TT_NETDIR:-/sys/class/net}
+LOCKDIR=${TT_MULTI_LOCK:-/var/lock/trusttunnel-multi-tun.lock}
+child=""
+own_lock=0
+snapshot="$OUTDIR/$id/tun.before"
+
+log() { logger -t trusttunnel-multi "[$id] $*" 2>/dev/null || echo "[$id] $*" >&2; }
+release_lock() {
+	if [ "$own_lock" = 1 ]; then
+		rm -f "$LOCKDIR/pid"
+		rmdir "$LOCKDIR" 2>/dev/null || true
+		own_lock=0
+	fi
+}
+blackhole() {
+	$IP route flush table "$table" 2>/dev/null || true
+	$IP -6 route flush table "$table" 2>/dev/null || true
+	$IP route replace blackhole default table "$table" metric 32767 2>/dev/null || true
+	$IP -6 route replace blackhole default table "$table" metric 32767 2>/dev/null || true
+	rm -f "$OUTDIR/$id/device"
+}
+cleanup() {
+	release_lock
+	if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+		kill "$child" 2>/dev/null || true
+		wait "$child" 2>/dev/null || true
+	fi
+	blackhole
+}
+trap 'cleanup; exit 143' INT TERM HUP
+trap 'release_lock' EXIT
+
+waited=0
+while ! mkdir "$LOCKDIR" 2>/dev/null; do
+	if [ -f "$LOCKDIR/pid" ]; then
+		lock_pid=$(cat "$LOCKDIR/pid" 2>/dev/null)
+		case "$lock_pid" in ''|*[!0-9]*) lock_pid=0;; esac
+		if ! kill -0 "$lock_pid" 2>/dev/null; then
+			rm -f "$LOCKDIR/pid"
+			rmdir "$LOCKDIR" 2>/dev/null || true
+		fi
+	fi
+	[ "$waited" -lt 60 ] || { log 'timed out waiting for TUN discovery lock'; exit 1; }
+	sleep 1
+	waited=$((waited + 1))
+done
+own_lock=1
+printf '%s\n' "$$" > "$LOCKDIR/pid"
+
+: > "$snapshot"
+for n in "$NETDIR"/*; do
+	[ -e "$n/tun_flags" ] && printf '%s\n' "${n##*/}" >> "$snapshot"
+done
+
+"$CLIENT" -c "$config" &
+child=$!
+device=""
+waited=0
+while [ "$waited" -lt 30 ]; do
+	for n in "$NETDIR"/*; do
+		[ -e "$n/tun_flags" ] || continue
+		candidate=${n##*/}
+		grep -Fxq "$candidate" "$snapshot" && continue
+		device=$candidate
+		break
+	done
+	[ -n "$device" ] && break
+	kill -0 "$child" 2>/dev/null || break
+	sleep 1
+	waited=$((waited + 1))
+done
+release_lock
+
+if [ -z "$device" ]; then
+	log 'client did not create a TUN interface'
+	wait "$child" 2>/dev/null
+	rc=$?
+	blackhole
+	exit "$rc"
+fi
+
+printf '%s\n' "$device" > "$OUTDIR/$id/device"
+$IP route replace default dev "$device" table "$table" metric 1 || { cleanup; exit 1; }
+$IP -6 route replace default dev "$device" table "$table" metric 1 || { cleanup; exit 1; }
+log "attached $device to route table $table"
+
+wait "$child"
+rc=$?
+child=""
+blackhole
+exit "$rc"

@@ -1,0 +1,37 @@
+#!/bin/sh
+set -u
+failure_interval="${1:-10}"
+stable_interval="${2:-300}"
+case "$failure_interval" in ''|*[!0-9]*) failure_interval=10;; esac
+case "$stable_interval" in ''|*[!0-9]*) stable_interval=300;; esac
+[ "$failure_interval" -ge 5 ] || failure_interval=5
+[ "$stable_interval" -ge 60 ] || stable_interval=60
+stable=0
+failed=0
+sleep 5
+while :; do
+	/usr/libexec/trusttunnel/multi-manager select \
+		|| logger -t trusttunnel-multi 'health refresh failed'
+	if grep -q "$(printf '\tdown\t')" /var/etc/trusttunnel/multi/health.tsv 2>/dev/null ||
+	   grep -q "$(printf '\t-\t')" /var/etc/trusttunnel/multi/selection.tsv 2>/dev/null; then
+		stable=0; failed=$((failed + 1)); delay=$failure_interval
+		if [ "$failed" -ge 6 ] && [ -s /etc/trusttunnel/last-good.uci ] &&
+		   [ ! -e /var/run/trusttunnel-rollback-attempted ]; then
+			touch /var/run/trusttunnel-rollback-attempted
+			logger -t trusttunnel-multi 'new configuration has no healthy server; restoring last known working configuration'
+			uci -q revert trusttunnel
+			if uci import trusttunnel < /etc/trusttunnel/last-good.uci && uci commit trusttunnel; then
+				(sleep 1; /etc/init.d/trusttunnel restart) >/dev/null 2>&1 &
+				exit 0
+			fi
+		fi
+	else
+		failed=0; stable=$((stable + 1))
+		if [ "$stable" -ge 3 ]; then
+			/usr/libexec/trusttunnel/multi-manager save-good
+			rm -f /var/run/trusttunnel-rollback-attempted
+		fi
+		delay=$stable_interval
+	fi
+	sleep "$delay"
+done

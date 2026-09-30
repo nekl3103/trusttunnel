@@ -6,6 +6,288 @@ msgstr ""
 msgid "TrustTunnel"
 msgstr "TrustTunnel"
 
+msgid "Servers"
+msgstr "Серверы"
+
+msgid "Site groups"
+msgstr "Группы сайтов"
+
+msgid "Servers and routing"
+msgstr "Серверы и маршрутизация"
+
+msgid "Server"
+msgstr "Сервер"
+
+msgid "Group"
+msgstr "Группа"
+
+msgid "Group routing"
+msgstr "Маршрутизация групп"
+
+msgid "State"
+msgstr "Состояние"
+
+msgid "Latency"
+msgstr "Задержка"
+
+msgid "Recent quality"
+msgstr "История качества"
+
+msgid "Reason"
+msgstr "Причина"
+
+msgid "Changed"
+msgstr "Изменено"
+
+msgid "Temporary override"
+msgstr "Временный выбор"
+
+msgid "Automatic"
+msgstr "Автоматически"
+
+msgid "Apply for 30 min"
+msgstr "Применить на 30 минут"
+
+msgid "Routing override applied"
+msgstr "Временная маршрутизация применена"
+
+msgid "Automatic multi-server routing"
+msgstr "Автоматическая маршрутизация по серверам"
+
+msgid "Fastest"
+msgstr "Самый быстрый"
+
+msgid "Primary + fallback"
+msgstr "Основной и резервные"
+
+msgid "Eligible servers"
+msgstr "Доступные серверы"
+
+msgid "Primary server"
+msgstr "Основной сервер"
+
+msgid "Switch advantage, ms"
+msgstr "Преимущество для переключения, мс"
+
+msgid "Switch cooldown, seconds"
+msgstr "Пауза между переключениями, секунд"
+
+msgid "Additional domains (one per line)"
+msgstr "Дополнительные домены, по одному в строке"
+
+msgid "Options"
+msgstr "Настройки"
+
+msgid "None"
+msgstr "Нет"
+
+msgid "global"
+msgstr "общее значение"
+
+msgid "%d usable of %d rules"
+msgstr "применяется %d из %d правил"
+
+msgid "%d unsupported"
+msgstr "не поддерживается: %d"
+
+msgid "Available services"
+msgstr "Выбранные группы"
+
+msgid "Only enabled servers are started and checked. With one enabled server it is used directly; with several servers automatic groups choose the fastest healthy one."
+msgstr "Запускаются и проверяются только включённые серверы. При нескольких серверах группы выбирают лучший доступный автоматически."
+
+msgid "Enabled"
+msgstr "Включён"
+
+msgid "Name"
+msgstr "Название"
+
+msgid "Configuration"
+msgstr "Конфигурация"
+
+msgid "Import…"
+msgstr "Импортировать…"
+
+msgid "TLS host name"
+msgstr "Имя сервера TLS"
+
+msgid "User name"
+msgstr "Имя пользователя"
+
+msgid "Password"
+msgstr "Пароль"
+
+msgid "Transport"
+msgstr "Транспорт"
+
+msgid "Priority penalty, ms"
+msgstr "Штраф приоритета, мс"
+
+msgid "Anti-DPI"
+msgstr "Защита от DPI"
+
+msgid "Post-quantum key exchange"
+msgstr "Постквантовый обмен ключами"
+
+msgid "Server carries IPv6"
+msgstr "Сервер поддерживает IPv6"
+
+msgid "Skip certificate verification"
+msgstr "Не проверять сертификат"
+
+msgid "Custom SNI"
+msgstr "Собственный SNI"
+
+msgid "Client random prefix"
+msgstr "Префикс случайных данных клиента"
+
+msgid "Pinned certificate (PEM)"
+msgstr "Закреплённый сертификат PEM"
+
+msgid "DNS used by the client itself"
+msgstr "DNS для самого клиента"
+
+msgid "Stored securely; leave blank to keep it"
+msgstr "Хранится защищённо; оставьте пустым, чтобы не менять"
+
+msgid "Update automatically"
+msgstr "Обновлять автоматически"
+
+msgid "Update interval"
+msgstr "Интервал обновления"
+
+msgid "Daily"
+msgstr "Ежедневно"
+
+msgid "Weekly"
+msgstr "Еженедельно"
+
+msgid "Update now"
+msgstr "Обновить сейчас"
+
+msgid "Update lists"
+msgstr "Обновить списки"
+
+msgid "Catalog"
+msgstr "Каталог"
+
+msgid "Refresh categories"
+msgstr "Обновить категории"
+
+msgid "available"
+msgstr "доступен"
+
+msgid "unavailable"
+msgstr "недоступен"
+
+msgid "no healthy server"
+msgstr "нет доступного сервера"
+
+msgid "Latest checks"
+msgstr "Последние проверки"
+
+msgid "Now"
+msgstr "Сейчас"
+
+msgid "Switch only when faster by, ms"
+msgstr "Порог переключения, мс"
+
+msgid "Categories from v2fly/domain-list-community, the source used to build geosite.dat. Enable a category and choose automatic server selection or pin it to one server."
+msgstr "Группы из v2fly/domain-list-community, на основе которого собирается geosite.dat. Для каждой выбранной группы можно назначить автоматический выбор или закрепить сервер."
+
+msgid "This section contains no values yet"
+msgstr "Устройства ещё не добавлены"
+
+msgid "A cron job refreshes and validates selected lists at 04:17."
+msgstr "Выбранные списки автоматически обновляются и проверяются в 04:17."
+
+msgid "Downloads the current geosite category index from GitHub."
+msgstr "Загружает с GitHub актуальный каталог групп geosite."
+
+msgid "Automatic — best available server"
+msgstr "Автоматически — лучший доступный сервер"
+
+msgid "Server to test"
+msgstr "Проверяемый сервер"
+
+msgid "Check the server configurations and the client log below."
+msgstr "Проверьте настройки серверов и журнал клиента ниже."
+
+msgid "Edit"
+msgstr "Изменить"
+
+msgid "Delete"
+msgstr "Удалить"
+
+msgid "Add"
+msgstr "Добавить"
+
+msgid "none"
+msgstr "нет"
+
+msgid "Save & Apply"
+msgstr "Сохранить и применить"
+
+msgid "Save"
+msgstr "Сохранить"
+
+msgid "Reset"
+msgstr "Сбросить"
+
+msgid "Refreshing geosite categories…"
+msgstr "Обновление каталога групп geosite…"
+
+msgid "Versions"
+msgstr "Версии"
+
+msgid "Package"
+msgstr "Пакет"
+
+msgid "TrustTunnel client"
+msgstr "Клиент TrustTunnel"
+
+msgid "%d of %d available"
+msgstr "доступно %d из %d"
+
+msgid "%d active"
+msgstr "активно: %d"
+
+msgid "Automatic routing is working"
+msgstr "Автоматическая маршрутизация работает"
+
+msgid "No server is available"
+msgstr "Нет доступных серверов"
+
+msgid "The service is not running"
+msgstr "Служба не запущена"
+
+msgid "The service is off"
+msgstr "Служба выключена"
+
+msgid "working"
+msgstr "работает"
+
+msgid "not checked"
+msgstr "не проверено"
+
+msgid "not installed"
+msgstr "не установлен"
+
+msgid "unknown"
+msgstr "неизвестно"
+
+msgid "up to date"
+msgstr "актуальная версия"
+
+msgid "the installed version is newer than the latest release (%s)"
+msgstr "установленная версия новее последнего выпуска (%s)"
+
+msgid "%s is available"
+msgstr "доступна версия %s"
+
+msgid "Check now"
+msgstr "Проверить сейчас"
+
 msgid "Status and test"
 msgstr "Состояние и проверка"
 
@@ -722,6 +1004,84 @@ msgstr "Используется для TLS-сессии, не для маршр
 
 msgid "User name"
 msgstr "Имя пользователя"
+
+msgid "TrustTunnel multi-server"
+msgstr "TrustTunnel: несколько серверов"
+
+msgid "Run independent TrustTunnel clients and route each site group through a fixed server or the currently fastest healthy server in its pool. On low-memory routers keep the number of enabled servers small."
+msgstr "Запускает независимый клиент TrustTunnel для каждого сервера и направляет каждую группу сайтов через закреплённый или самый быстрый доступный сервер из её набора. На роутерах с небольшим объёмом памяти включайте минимум серверов."
+
+msgid "Multi-server mode"
+msgstr "Режим нескольких серверов"
+
+msgid "Multi-server"
+msgstr "Несколько серверов"
+
+msgid "When disabled, the original single-server configuration remains active."
+msgstr "Когда режим выключен, продолжает работать исходная конфигурация с одним сервером."
+
+msgid "Health refresh interval, seconds"
+msgstr "Интервал проверки серверов, секунд"
+
+msgid "Switch threshold, milliseconds"
+msgstr "Порог переключения, миллисекунд"
+
+msgid "Keep the current server unless another one is faster by at least this value."
+msgstr "Текущий сервер сохраняется, пока другой не станет быстрее как минимум на это значение."
+
+msgid "Minimum time between switches, seconds"
+msgstr "Минимальное время между переключениями, секунд"
+
+msgid "Current selection"
+msgstr "Текущий выбор"
+
+msgid "Servers"
+msgstr "Серверы"
+
+msgid "Site groups"
+msgstr "Группы сайтов"
+
+msgid "Paste a tt:// link or endpoint TOML. The imported credentials are stored only in the selected server section."
+msgstr "Вставьте ссылку tt:// или TOML сервера. Импортированные данные сохраняются только в выбранной секции сервера."
+
+msgid "Import TrustTunnel server"
+msgstr "Импорт сервера TrustTunnel"
+
+msgid "Priority penalty"
+msgstr "Штраф приоритета"
+
+msgid "Added to the measured latency score. Use it to prefer one server when latency is similar."
+msgstr "Прибавляется к измеренной задержке. Позволяет предпочесть один сервер при близкой задержке."
+
+msgid "Post-quantum TLS"
+msgstr "Постквантовый TLS"
+
+msgid "Pinned certificate"
+msgstr "Закреплённый сертификат"
+
+msgid "Tunnel DNS upstreams"
+msgstr "DNS-серверы внутри туннеля"
+
+msgid "Selection"
+msgstr "Выбор"
+
+msgid "Fastest healthy server"
+msgstr "Самый быстрый доступный сервер"
+
+msgid "Fixed server"
+msgstr "Закреплённый сервер"
+
+msgid "Automatic server pool"
+msgstr "Набор серверов для автовыбора"
+
+msgid "A root domain also covers its subdomains."
+msgstr "Корневой домен также включает все его поддомены."
+
+msgid "Domain-list paths"
+msgstr "Пути к спискам доменов"
+
+msgid "Subnet-list paths"
+msgstr "Пути к спискам подсетей"
 
 msgid "QUIC is often faster, but some networks throttle or block UDP."
 msgstr "QUIC часто быстрее, но некоторые сети ограничивают или блокируют UDP."

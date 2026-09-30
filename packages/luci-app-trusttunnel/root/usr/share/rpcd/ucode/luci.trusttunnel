@@ -49,7 +49,7 @@ const CATALOG_URL = 'https://api.github.com/repos/itdoginfo/allow-domains/git/tr
 // невидимым, а пакет рядом честно писал «актуальная версия» — хотя install.sh
 // обновляет и клиента тоже. Так вышло с клиентом 1.1.5 (2 сентября 2026):
 // роутер с 1.0.49 о нём не знал ничего.
-const RELEASE_URL = 'https://api.github.com/repos/NooBiToo/TrustTunnelOpenWrt/releases/latest';
+const RELEASE_URL = 'https://api.github.com/repos/nekl3103/trusttunnel/releases/latest';
 const VERSION_CACHE = '/var/cache/trusttunnel/release.json';
 const CLIENT_RELEASE_URL = 'https://api.github.com/repos/TrustTunnel/TrustTunnelClient/releases/latest';
 const CLIENT_VERSION_CACHE = '/var/cache/trusttunnel/client-release.json';
@@ -363,6 +363,133 @@ function endpoint_host(addr) {
 	return m ? m[1] : addr;
 }
 
+function multi_runtime() {
+	let base = OUTDIR + '/multi';
+	let health = {}, selected = {}, servers = [], groups = [], history = {}, overrides = {}, groupHealth = {}, switches = [];
+	for (let line in split(readfile(base + '/health.tsv') ?? '', '\n')) {
+		let p = split(line, '\t');
+		if (length(p) >= 3) health[p[0]] = {
+			state: p[1], latency: +p[2], loss: +(p[3] ?? 100), checked: +(p[4] ?? 0),
+			score: +(p[5] ?? p[2]), failures: +(p[6] ?? 0), endpoint_latency: +(p[7] ?? 999999),
+			speed: +(p[8] ?? 0), success: +(p[9] ?? 0)
+		};
+	}
+	for (let line in split(readfile(base + '/selection.tsv') ?? '', '\n')) {
+		let p = split(line, '\t');
+		if (length(p) >= 2) selected[p[0]] = { server: p[1], changed: +(p[2] ?? 0), reason: p[3] ?? '', score: +(p[4] ?? 0) };
+	}
+	for (let line in split(readfile(base + '/overrides.tsv') ?? '', '\n')) {
+		let p = split(line, '\t'); if (length(p) >= 3) overrides[p[0]] = { server: p[1], until: +p[2] };
+	}
+	for (let line in split(readfile(base + '/history.tsv') ?? '', '\n')) {
+		let p = split(line, '\t'); if (length(p) < 6) continue;
+		if (!history[p[1]]) history[p[1]] = [];
+		push(history[p[1]], { at: +p[0], state: p[2], latency: +p[3], loss: +p[4], score: +p[5] });
+	}
+	for (let line in split(readfile(base + '/group-health.tsv') ?? '', '\n')) {
+		let p = split(line, '\t'); if (length(p) >= 5) groupHealth[p[0]] = {
+			server: p[1], state: p[2], latency: +p[3], checked: +p[4], url: p[5] ?? ''
+		};
+	}
+	for (let line in split(readfile(base + '/switch-history.tsv') ?? '', '\n')) {
+		let p = split(line, '\t'); if (length(p) >= 5) push(switches, {
+			at: +p[0], group: p[1], from: p[2], to: p[3], reason: p[4], score: +(p[5] ?? 0)
+		});
+	}
+	for (let line in split(readfile(base + '/servers.tsv') ?? '', '\n')) {
+		let p = split(line, '\t');
+		if (length(p) < 7) continue;
+		let id = p[0], h = health[id] ?? { state: 'down', latency: 999999, loss: 100, checked: 0, score: 999999, failures: 0, endpoint_latency: 999999, speed: 0, success: 0 };
+		let dev = trim(readfile(base + '/' + id + '/device') ?? '');
+		push(servers, {
+			id: id, name: uciget('trusttunnel.' + id + '.name') || id,
+			enabled: uciget('trusttunnel.' + id + '.enabled') != '0',
+			host: p[4], port: +p[5], state: h.state, latency: h.latency,
+			device: dev, table: +p[3], mark: p[2], loss: h.loss, checked: h.checked,
+			score: h.score, failures: h.failures, endpoint_latency: h.endpoint_latency,
+			speed: h.speed, success: h.success, history: history[id] ?? []
+		});
+	}
+	let shown = {};
+	for (let line in split(readfile(base + '/selection.tsv') ?? '', '\n')) {
+		let p = split(line, '\t');
+		if (length(p) < 2 || shown[p[0]]) continue;
+		shown[p[0]] = true;
+		let sel = selected[p[0]] ?? { server: p[1] };
+		push(groups, {
+			id: p[0], name: uciget('trusttunnel.' + p[0] + '.name') || p[0],
+			server: p[1] == '-' ? null : p[1], changed: +(p[2] ?? 0), reason: p[3] ?? '',
+			score: +(p[4] ?? 0), strategy: uciget('trusttunnel.' + p[0] + '.strategy') || 'auto',
+			override: overrides[p[0]] ?? null, check: groupHealth[p[0]] ?? null
+		});
+	}
+	return { servers: servers, groups: groups, selected: selected, switches: switches };
+}
+
+function multi_device(server) {
+	let m = multi_runtime();
+	let wanted = server;
+	if (!wanted || wanted == 'auto') {
+		for (let g in m.groups)
+			if (g.server) { wanted = g.server; break; }
+	}
+	for (let s in m.servers)
+		if (s.id == wanted && length(s.device)) return s.device;
+	for (let s in m.servers)
+		if (s.state == 'up' && length(s.device)) return s.device;
+	return null;
+}
+
+function multi_diagnose(wanted) {
+	let checks = [], mr = multi_runtime();
+	let enabled = uciget('trusttunnel.main.enabled') == '1';
+	let running = sh('/etc/init.d/trusttunnel running').code == 0;
+	function add(group, label, status, detail, hint) {
+		push(checks, { group: group, label: label, status: status,
+			detail: detail ?? '', hint: hint ?? '' });
+	}
+	let chosen = [];
+	for (let s in mr.servers)
+		if (!wanted || wanted == 'auto' || s.id == wanted) push(chosen, s);
+
+	add('config', 'Enabled servers', length(mr.servers) ? 'ok' : 'fail',
+		length(mr.servers) + ' enabled', length(mr.servers) ? '' : 'Enable at least one server in Settings.');
+	add('config', 'Selected server', length(chosen) ? 'ok' : 'fail',
+		wanted == 'auto' ? 'automatic' : (length(chosen) ? chosen[0].name : 'not found'), '');
+	add('config', 'Site groups', length(mr.groups) ? 'ok' : 'warn',
+		length(mr.groups) + ' configured', length(mr.groups) ? '' : 'Enable at least one site category in Settings.');
+
+	let client_ok = access(CLIENT) ? true : false;
+	let dnsmasq_version = sh_out('dnsmasq --version');
+	let nftset_ok = index(dnsmasq_version.out, 'no-nftset') < 0;
+	let tun_ok = access('/dev/net/tun') ? true : false;
+	add('prereq', 'TrustTunnel client', client_ok ? 'ok' : 'fail',
+		client_ok ? 'installed' : 'not installed', client_ok ? '' : 'Run install.sh.');
+	add('prereq', 'dnsmasq nftset support', nftset_ok ? 'ok' : 'fail',
+		nftset_ok ? 'supported' : 'missing', nftset_ok ? '' : 'Install dnsmasq-full.');
+	add('prereq', 'tun device', tun_ok ? 'ok' : 'fail',
+		tun_ok ? '/dev/net/tun present' : 'missing', tun_ok ? '' : 'Install kmod-tun.');
+	add('service', 'Enabled', enabled ? 'ok' : 'warn', enabled ? 'yes' : 'no', '');
+	add('service', 'Running', running ? 'ok' : (enabled ? 'fail' : 'skip'), running ? 'yes' : 'no', '');
+	let nft_ok = sh_out('nft list table inet trusttunnel_multi').code == 0;
+	add('kernel', 'nftables table', nft_ok ? 'ok' : (running ? 'fail' : 'skip'),
+		nft_ok ? 'present' : 'absent', '');
+
+	for (let s in chosen) {
+		let device_ok = length(s.device) && access('/sys/class/net/' + s.device);
+		add('network', s.name, s.state == 'up' && device_ok ? 'ok' : (running ? 'fail' : 'skip'),
+			s.state == 'up' ? s.latency + ' ms via ' + s.device : 'unavailable',
+			s.state == 'up' ? '' : 'Check this server configuration and the client log.');
+	}
+	for (let g in mr.groups)
+		add('lists', g.name, g.server ? 'ok' : 'fail',
+			g.server ? 'using ' + (uciget('trusttunnel.' + g.server + '.name') || g.server) : 'no healthy server', '');
+
+	let n = { ok: 0, warn: 0, fail: 0, skip: 0 };
+	for (let c in checks) n[c.status] = n[c.status] + 1;
+	return { checks: checks, counts: n, verdict: n.fail ? 'fail' : (n.warn ? 'warn' : 'ok') };
+}
+
 // Показывает, способен ли текущий dnsmasq на nftset=. Без него режим
 // selective (по умолчанию) не может работать вовсе — установщик только
 // ПРЕДЛАГАЕТ dnsmasq-full и не принуждает, поэтому это надо проверять и
@@ -382,22 +509,31 @@ return {
 		call: function() {
 			let rec = records();
 			let rs = routing_status();
+			let multi = uciget('trusttunnel.main.multi_server') == '1';
+			let mr = multi ? multi_runtime() : { servers: [], groups: [] };
 			let running = sh('/etc/init.d/trusttunnel running').code == 0;
 			// Устройство берётся из ЖИВОГО состояния, а не из настроек: его создаёт
 			// клиент и имя выбирает сам. null означает "клиент устройства пока не
 			// создал" — и это честнее, чем показывать имя из конфига, которого в
 			// системе нет.
-			let dev = rs.device;
+			let dev = multi ? multi_device('auto') : rs.device;
+			let any_up = false;
+			for (let s in mr.servers) if (s.state == 'up' && length(s.device)) any_up = true;
 			let updated = trim(readfile(LISTS_UPDATED) ?? '');
 			return {
 				enabled: uciget('trusttunnel.main.enabled') == '1',
 				running: running,
 				mode: first(rec, 'main.mode', 'selective'),
+				multi_server: multi,
+				device_routing: uciget('trusttunnel.main.device_routing') == '1',
+				servers: mr.servers,
+				groups: mr.groups,
+				switches: mr.switches,
 				device: dev,
-				device_up: rs.device_up,
-				rule: rs.rule,
-				table: rs.table,
-				nft: rs.nft,
+				device_up: multi ? any_up : rs.device_up,
+				rule: multi ? length(mr.servers) > 0 : rs.rule,
+				table: multi ? length(mr.servers) > 0 : rs.table,
+				nft: multi ? sh_out('nft list table inet trusttunnel_multi').code == 0 : rs.nft,
 				endpoint_hostname: first(rec, 'endpoint.hostname', ''),
 				addresses: rec['endpoint.address'] ?? [],
 				set4: set_size('tt_bypass4'),
@@ -451,7 +587,10 @@ return {
 		call: function(req) {
 			let targets = [];
 			let t = trim(req.args?.target ?? '');
-			if (length(t)) {
+			if (length(t) && uciget('trusttunnel.' + t) == 'server') {
+				let raw = sh_out('uci -q get ' + shq('trusttunnel.' + t + '.address')).out;
+				for (let a in split(trim(raw), ' ')) if (length(a)) push(targets, endpoint_host(a));
+			} else if (length(t)) {
 				push(targets, t);
 			} else {
 				let rec = records();
@@ -471,11 +610,12 @@ return {
 	},
 
 	probe: {
-		args: {},
-		call: function() {
+		args: { server: 'auto' },
+		call: function(req) {
 			// Устройство берётся из живого состояния: своего у нас нет, а имя из
 			// настроек указывало бы в никуда.
-			let dev = routing_status().device;
+			let dev = uciget('trusttunnel.main.multi_server') == '1'
+				? multi_device(req.args?.server ?? 'auto') : routing_status().device;
 			if (dev == null)
 				return {
 					tunnel: { error: 'the client has not created a tunnel device yet' },
@@ -498,9 +638,10 @@ return {
 	// остановка. Устройство туннеля берётся из живого состояния, как в probe:
 	// имя из настроек указывало бы в никуда.
 	speedtest_start: {
-		args: {},
-		call: function() {
-			let dev = routing_status().device;
+		args: { server: 'auto' },
+		call: function(req) {
+			let dev = uciget('trusttunnel.main.multi_server') == '1'
+				? multi_device(req.args?.server ?? 'auto') : routing_status().device;
 			let r = sh(LIBDIR + '/speedtest start ' + shq(SPEEDTEST_DIR) + ' ' + shq(dev ?? '-'));
 			if (r.code != 0)
 				return { error: trim(r.out) || 'could not start' };
@@ -754,6 +895,22 @@ return {
 		}
 	},
 
+	geosite_catalog: {
+		args: { refresh: false },
+		call: function(req) {
+			let refresh = req.args?.refresh ? ' refresh' : '';
+			let r = sh_out(LIBDIR + '/geosite-sync catalog' + refresh);
+			if (r.code != 0) return { error: 'could not load geosite catalog' };
+			let items = [];
+			for (let line in split(r.out, '\n')) {
+				let p = split(line, '\t');
+				if (length(p) >= 2) push(items, { name: p[0], count: +p[1], applied: +(p[2] ?? p[1]), ignored: +(p[3] ?? 0) });
+			}
+			let updated = trim(readfile('/usr/share/trusttunnel/geosite.updated') ?? '');
+			return { items: items, updated: updated ? +updated : 0 };
+		}
+	},
+
 	log: {
 		args: { lines: 100 },
 		call: function(req) {
@@ -774,8 +931,10 @@ return {
 	// написано "нет" без объяснения что делать, заставляет пользователя гадать,
 	// а именно от этого раздел и должен избавить.
 	diagnose: {
-		args: {},
-		call: function() {
+		args: { server: 'auto' },
+		call: function(req) {
+			if (uciget('trusttunnel.main.multi_server') == '1')
+				return multi_diagnose(req.args?.server ?? 'auto');
 			let rec = records();
 			let rs = routing_status();
 			let checks = [];
@@ -1199,6 +1358,42 @@ return {
 				}
 			}
 			return out;
+		}
+	},
+
+	multi_status: {
+		args: {},
+		call: function(req) {
+			let r = sh('/usr/libexec/trusttunnel/multi-manager status');
+			return { code: r.code, output: r.out ?? '' };
+		}
+	},
+
+	multi_override: {
+		args: { group: '', server: 'auto', duration: 1800 },
+		call: function(req) {
+			let group = req.args?.group ?? '', server = req.args?.server ?? 'auto';
+			let duration = int(req.args?.duration ?? 1800);
+			if (uciget('trusttunnel.' + group) != 'group') return { error: 'unknown group' };
+			if (server != 'auto' && uciget('trusttunnel.' + server) != 'server') return { error: 'unknown server' };
+			if (duration < 60 || duration > 86400) duration = 1800;
+			let r = sh(LIBDIR + '/multi-manager override ' + shq(group) + ' ' + shq(server) + ' ' + duration);
+			return r.code == 0 ? { ok: true } : { error: trim(r.out) || 'switch failed' };
+		}
+	},
+
+	secret_set: {
+		args: { server: '', password: '' },
+		call: function(req) {
+			let server = req.args?.server ?? '', password = req.args?.password ?? '';
+			if (!match(server, /^[A-Za-z0-9_]+$/)) return { error: 'invalid server section' };
+			if (!length(password)) return { kept: true };
+			let inp = write_secret_tmp('password', password);
+			let r = sh(LIBDIR + '/secret-store set ' + shq(server) + ' < ' + shq(inp));
+			unlink(inp);
+			if (r.code != 0) return { error: trim(r.out) || 'could not store password' };
+			sh('uci -q delete ' + shq('trusttunnel.' + server + '.password') + '; uci -q commit trusttunnel');
+			return { stored: true };
 		}
 	},
 

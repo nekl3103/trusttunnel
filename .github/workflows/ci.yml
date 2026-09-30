@@ -34,6 +34,10 @@ jobs:
           packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/fetch-lists
           packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/gen-config
           packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/gen-lists
+          packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-client
+          packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-gen-config
+          packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-manager
+          packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-watch
           packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/normalize
           packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/routing
           packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/uci-export
@@ -71,6 +75,10 @@ jobs:
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/canon-subnets \
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/gen-config \
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/gen-lists \
+            packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-client \
+            packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-gen-config \
+            packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-manager \
+            packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-watch \
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/fetch-lists \
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/routing \
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/uci-export \

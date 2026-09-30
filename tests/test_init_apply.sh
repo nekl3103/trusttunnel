@@ -269,7 +269,8 @@ for k in $keys; do
 	if [ "$(change_class "$k" selective)" = "restart_full" ] \
 			&& [ "$k" != "network.table" ] \
 			&& [ "$k" != "network.fwmark" ] \
-			&& [ "$k" != "main.enabled" ]; then
+			&& [ "$k" != "main.enabled" ] \
+			&& [ "$k" != "main.multi_server" ]; then
 		missing="$missing $k"
 	fi
 done

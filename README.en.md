@@ -1,6 +1,6 @@
 # TrustTunnel for OpenWrt
 
-[Русский](README.md) · [Releases](https://github.com/NooBiToo/TrustTunnelOpenWrt/releases) · [Detailed guide](GUIDE.en.md) · [Report a bug](https://github.com/NooBiToo/TrustTunnelOpenWrt/issues)
+[Русский](README.md) · [Releases](https://github.com/nekl3103/trusttunnel/releases) · [Detailed guide](GUIDE.en.md) · [Report a bug](https://github.com/nekl3103/trusttunnel/issues)
 
 **Selected sites through a VPN, everything else direct. Configuration and diagnostics in LuCI.**
 
@@ -12,6 +12,7 @@ the router without needing a separate VPN client on each device.
 - **Browser-based configuration:** import a server config, select lists and manage the service in LuCI.
 - **Built-in diagnostics:** tunnel status, domain checks, endpoint ping and external IP comparison.
 - **Two modes:** route by list or send all LAN internet traffic through the VPN with exclusions; a killswitch for selected traffic.
+- **Multiple servers:** independent profiles, automatic pools and per-site-group egress selection.
 
 TrustTunnel is an open VPN protocol originally developed by AdGuard VPN,
 with HTTPS-based transport and features designed to resist DPI.
@@ -42,7 +43,7 @@ and asks for confirmation before replacing stock `dnsmasq`.
 Run over SSH **on the router**:
 
 ```sh
-sh -c "$(wget -O - https://raw.githubusercontent.com/NooBiToo/TrustTunnelOpenWrt/main/install.sh)"
+sh -c "$(wget -O - https://raw.githubusercontent.com/nekl3103/trusttunnel/main/install.sh)"
 ```
 
 The installer checks compatibility and installs dependencies, the LuCI package and the client binary.
@@ -90,7 +91,7 @@ See [routing modes](GUIDE.en.md#two-modes) and [killswitch](GUIDE.en.md#killswit
   Devices using their own DoH/DoT may bypass that matching.
 - A service may use multiple domains; use the community lists and domain checker.
 - Sites sharing an IP address may cause additional domains to be routed through the tunnel.
-- One server is supported; multiple profiles and automatic failover are not implemented yet.
+- Every enabled server consumes additional memory. On 256 MB routers, keep no more than two or three servers enabled at once.
 - Add guest network interfaces to the LAN interface settings explicitly.
 
 See the complete [limitations and workarounds](GUIDE.en.md#limitations).
@@ -107,10 +108,10 @@ To update, run the installation command again. It updates the package and client
 
 ## Support the project
 
-**If this package helped you, give it a ⭐ [on GitHub](https://github.com/NooBiToo/TrustTunnelOpenWrt).**
+**If this package helped you, give it a ⭐ [on GitHub](https://github.com/nekl3103/trusttunnel).**
 It helps other users discover the project.
 
-Found a bug or tested the package on your router? [Open an issue](https://github.com/NooBiToo/TrustTunnelOpenWrt/issues)
+Found a bug or tested the package on your router? [Open an issue](https://github.com/nekl3103/trusttunnel/issues)
 with your router model, OpenWrt version, package version and test results.
 Remove passwords and other connection details before posting logs.
 
