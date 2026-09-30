@@ -78,6 +78,7 @@ assert_contains "$(cat "$TT_TEST_TMP/dns-init.log")" 'restart' "dnsmasq restarts
 assert_contains "$(cat "$TT_TEST_TMP/out/srv_one/client.toml")" 'hostname = "vpn.example.com"' "per-server client config is generated"
 
 : > "$TT_TEST_TMP/nft.log"
+: > "$TT_TEST_TMP/dns-init.log"
 PATH="$TT_TEST_TMP/bin:$PATH" TT_FUNCTIONS="$stub" TT_DEVICE_ROUTING=1 \
 	TT_LIBDIR="$root/packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel" \
 	TT_MULTI_OUT="$TT_TEST_TMP/out" TT_LISTS_DIR="$TT_TEST_TMP/lists" \
@@ -88,8 +89,8 @@ PATH="$TT_TEST_TMP/bin:$PATH" TT_FUNCTIONS="$stub" TT_DEVICE_ROUTING=1 \
 assert_contains "$(cat "$TT_TEST_TMP/nft.log")" \
 	'add rule inet trusttunnel_multi r_grp_video ip saddr 192.168.1.20 drop' \
 	"device routing limits the group killswitch to the assigned source"
-assert_contains "$(cat "$TT_TEST_TMP/dns-init.log")" 'reload' \
-	"unchanged mappings clear the dnsmasq cache after recreating nft sets"
+assert_contains "$(cat "$TT_TEST_TMP/dns-init.log")" 'restart' \
+	"unchanged mappings restart dnsmasq after recreating nft sets"
 
 cat > "$TT_TEST_TMP/bin/dnsmasq" <<'EOF'
 #!/bin/sh

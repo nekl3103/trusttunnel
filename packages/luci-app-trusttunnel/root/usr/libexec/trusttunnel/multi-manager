@@ -444,11 +444,10 @@ publish_dnsmasq() {
 	else
 		# build_routing() recreates the nft table, so all dynamically learned
 		# addresses disappear even when the domain mapping did not change.
-		# dnsmasq can still hold the old answers in its cache and does not add
-		# cached answers to the newly created sets. A reload clears that cache
-		# without interrupting the router's DNS service with a full restart.
-		$DNSMASQ_INIT reload >/dev/null 2>&1 ||
-			$DNSMASQ_INIT restart >/dev/null 2>&1
+		# OpenWrt's dnsmasq reload keeps cached answers, so they are not added
+		# to the new sets. Restart only when routing is rebuilt; health checks
+		# never call this path.
+		$DNSMASQ_INIT restart >/dev/null 2>&1
 	fi
 }
 
