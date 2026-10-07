@@ -24,6 +24,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Verify regression tests before building
+        run: sh tests/run.sh
+
       # Каталог артефактов отделён от фида НАМЕРЕННО: действие переносит
       # собранный bin/ в ARTIFACTS_DIR, а фидом у нас теперь служит весь
       # репозиторий — без этого разделения сотня чужих .apk высыпалась бы
@@ -81,6 +84,7 @@ jobs:
           # надо здесь, а не у пользователя.
           ls dist/luci-app-trusttunnel*.apk >/dev/null
           ls dist/luci-i18n-trusttunnel-*.apk >/dev/null
+          (cd dist && sha256sum *.apk > SHA256SUMS)
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v7
@@ -106,3 +110,11 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: dist/*
+          body: |
+            TrustTunnel для OpenWrt 25.12+ с пакетным менеджером APK.
+
+            Исправлены привязки серверов к группам, исключение недоступных серверов и загрузка правил DNS после перезапуска.
+            Пакеты LuCI имеют архитектуру all. Бинарник клиента устанавливается отдельно под архитектуру роутера через install.sh.
+
+            Установка и обновление: https://github.com/nekl3103/trusttunnel/blob/main/README.md
+            Контрольные суммы APK находятся в SHA256SUMS.
