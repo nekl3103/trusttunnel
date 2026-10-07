@@ -84,6 +84,12 @@ jobs:
           # надо здесь, а не у пользователя.
           ls dist/luci-app-trusttunnel*.apk >/dev/null
           ls dist/luci-i18n-trusttunnel-*.apk >/dev/null
+          # GitHub replaces '~' in uploaded asset names with '.'. Normalize
+          # before hashing so SHA256SUMS names match the downloaded files.
+          for f in dist/*~*.apk; do
+            [ -f "$f" ] || continue
+            mv "$f" "$(printf '%s' "$f" | tr '~' '.')"
+          done
           (cd dist && sha256sum *.apk > SHA256SUMS)
 
       - name: Upload Artifact

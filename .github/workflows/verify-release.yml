@@ -1,0 +1,36 @@
+name: Verify published release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (empty means latest)
+        required: false
+        type: string
+  push:
+    branches: [ main ]
+    paths: [ '.github/workflows/verify-release.yml' ]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify published APKs and normalize checksum filenames
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          if [ -z "$tag" ]; then
+            tag=$(gh release view --json tagName --jq .tagName)
+          fi
+          gh release download "$tag" --pattern '*.apk' --pattern SHA256SUMS --dir dist
+          tr '~' '.' < dist/SHA256SUMS > dist/SHA256SUMS.expected
+          (cd dist && sha256sum --check SHA256SUMS.expected)
+          (cd dist && sha256sum *.apk > SHA256SUMS)
+          gh release upload "$tag" dist/SHA256SUMS --clobber
