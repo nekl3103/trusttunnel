@@ -141,7 +141,9 @@ fi
 say "== Installing the package"
 apk add --allow-untrusted "$tmp/pkg.apk"
 if [ -f "$tmp/i18n.apk" ]; then
-	apk add --allow-untrusted "$tmp/i18n.apk" \
+	# Older builds used luci-i18n-trusttunnel-direct-ru for the same LMO file.
+	# Allow the current translation to replace that legacy file on upgrade.
+	apk add --force-overwrite --allow-untrusted "$tmp/i18n.apk" \
 		|| say "warning: the translation package failed to install; the interface will be English"
 fi
 

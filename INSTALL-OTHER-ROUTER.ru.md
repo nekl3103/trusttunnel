@@ -57,7 +57,7 @@ scp -O luci-i18n-trusttunnel-ru-*.apk root@192.168.1.1:/tmp/
 
 ```sh
 apk add --allow-untrusted /tmp/luci-app-trusttunnel-1.1.0-r18.apk
-apk add --allow-untrusted /tmp/luci-i18n-trusttunnel-ru-*.apk
+apk add --force-overwrite --allow-untrusted /tmp/luci-i18n-trusttunnel-ru-*.apk
 rm -f /tmp/luci-indexcache
 /etc/init.d/rpcd restart
 ```
