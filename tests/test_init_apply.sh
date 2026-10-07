@@ -277,4 +277,30 @@ done
 assert_eq "" "$missing" \
 	"каждый ключ схемы классифицирован явно, ни один не свалился в ветку незнакомых"
 
+# Multi-server reload errors must preserve running clients; only the explicit
+# configuration-change status requests a restart.
+mkdir -p "$sandbox/bin"
+cat > "$sandbox/bin/multi-manager" <<'EOF'
+#!/bin/sh
+exit "${TT_RELOAD_RESULT:-0}"
+EOF
+chmod +x "$sandbox/bin/multi-manager"
+LIBDIR="$sandbox/bin"
+uci() { printf 1; }
+running() { return 0; }
+logger() { :; }
+restart() { printf 'restart\n' >> "$sandbox/restarts"; return "${TT_RESTART_RESULT:-0}"; }
+: > "$sandbox/restarts"
+TT_RELOAD_RESULT=1; export TT_RELOAD_RESULT
+assert_exit 1 'failed multi reload returns the error' apply_settings
+assert_eq '' "$(cat "$sandbox/restarts")" 'failed multi reload does not restart clients'
+TT_RELOAD_RESULT=0
+assert_exit 0 'successful multi reload returns success' apply_settings
+assert_eq '' "$(cat "$sandbox/restarts")" 'successful multi reload does not restart clients'
+TT_RELOAD_RESULT=10
+assert_exit 0 'changed client configuration requests a restart' apply_settings
+assert_eq restart "$(cat "$sandbox/restarts")" 'explicit restart status restarts clients'
+TT_RESTART_RESULT=7
+assert_exit 7 'required restart failure is returned to the caller' apply_settings
+
 tt_test_summary

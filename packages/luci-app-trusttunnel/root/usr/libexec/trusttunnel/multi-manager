@@ -128,7 +128,7 @@ measure_tunnel() {
 	[ -s "$OUTDIR/$id/device" ] || { printf 999999; return; }
 	dev=$(cat "$OUTDIR/$id/device")
 	_seconds=$(curl -4 -fsS -o /dev/null --interface "$dev" --connect-timeout 3 --max-time 6 \
-		-w '%{time_starttransfer}' https://api.ipify.org 2>/dev/null || true)
+		-w '%{time_starttransfer}' https://api.ipify.org 2>/dev/null) || { printf 999999; return; }
 	_v=$(awk -v seconds="${_seconds:-0}" 'BEGIN { if (seconds > 0) printf "%.0f", seconds * 1000 }')
 	[ -n "${_v:-}" ] || _v=999999
 	printf '%s' "${_v%.*}"
@@ -182,9 +182,10 @@ refresh_health() {
 		else
 			state=down; loss=100; failures=$((old_failures + 1)); latency=999999; score=999999
 			success=$((old_success * 9 / 10))
+
 		fi
 		speed=$old_speed
-		[ "$do_speed" = 1 ] && [ "$state" = up ] && speed=$(measure_speed "$id")
+		[ "$do_speed" = 1 ] && [ "$state" = up ] && [ "$failures" = 0 ] && speed=$(measure_speed "$id")
 		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$state" "$latency" "$loss" "$now" "$score" "$failures" "$endpoint_latency" "$speed" "$success" >> "$HEALTH.new"
 		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$id" "$state" "$latency" "$loss" "$score" "$device" >> "$HISTORY.current"
 	done
@@ -200,15 +201,82 @@ refresh_health() {
 
 pool=""
 add_pool() { pool="${pool}${pool:+ }$1"; }
+route_signature() {
+	for opt in strategy server primary metric; do
+		signature_value=""
+		config_get signature_value "$1" "$opt"
+		printf '%s\t%s\n' "$opt" "$signature_value"
+	done
+	pool=""; config_list_foreach "$1" pool add_pool
+	printf 'pool\t%s\n' "$pool"
+}
+client_snapshot() {
+	uci export trusttunnel | awk '
+		/^config / { keep=($2 != "group" && $2 != "lists" && $2 != "device" && $2 != "domains") }
+		keep { print }
+	'
+	for snapshot_server in $_servers; do
+		printf 'secret %s ' "$snapshot_server"
+		"$LIBDIR/secret-store" get "$snapshot_server" 2>/dev/null | sha256sum
+	done
+}
+prune_overrides() {
+	[ -f "$OVERRIDES" ] || return 0
+	: > "$OVERRIDES.new"
+	now=$(date +%s)
+	for override_group in $_groups; do
+		signature=$(route_signature "$override_group" | sha256sum | awk '{print $1}')
+		awk -F '\t' -v group="$override_group" -v now="$now" -v signature="$signature" '$1==group && ($3==0 || $3>now) && $4==signature' "$OVERRIDES" >> "$OVERRIDES.new"
+	done
+	mv "$OVERRIDES.new" "$OVERRIDES"
+}
+# Eligibility must also hold when retaining the current or primary server.
+server_eligible() {
+	case " $pool " in *" $1 "*) ;; *) return 1;; esac
+	case " $_servers " in *" $1 "*) ;; *) return 1;; esac
+	[ -n "$(server_field "$1" 3)" ] || return 1
+	[ "$(health_field "$1" 2)" = up ] || return 1
+	[ "$(health_field "$1" 7)" = 0 ] || return 1
+	if [ -f "$GROUP_HEALTH" ]; then
+		eligible_health=$(awk -F '\t' -v g="$group" -v id="$1" 'NF>=8 && $1==g && $2==id && $7+0>=3 {print $3 " " $5; exit}' "$GROUP_HEALTH")
+		eligible_state=${eligible_health%% *}; eligible_at=${eligible_health##* }
+		case "$eligible_at" in ''|*[!0-9]*) eligible_at=0;; esac
+		if [ "$eligible_state" = fail ] && [ "$((now - eligible_at))" -lt 900 ]; then return 1; fi
+	fi
+	return 0
+}
+
+server_score() {
+	score_latency=$(awk -F '\t' -v id="$1" '$1==id && $2=="up" {print ($6 ? $6 : $3); exit}' "$HEALTH")
+	[ -n "$score_latency" ] || return 1
+	score_priority=$(server_field "$1" 7); case "$score_priority" in ''|*[!0-9]*) score_priority=0;; esac
+	case "$metric" in
+		speed)
+			score_speed=$(health_field "$1" 9); case "$score_speed" in ''|*[!0-9]*) score_speed=0;; esac
+			if [ "$score_speed" -gt 0 ]; then printf '%s' "$((100000000 / score_speed + score_priority))"
+			else printf '%s' "$((score_latency + score_priority))"; fi
+			;;
+		reliability)
+			score_success=$(health_field "$1" 10); case "$score_success" in ''|*[!0-9]*) score_success=0;; esac
+			printf '%s' "$(((100 - score_success) * 10000 + score_latency + score_priority))"
+			;;
+		*) printf '%s' "$((score_latency + score_priority))";;
+	esac
+}
+
 choose_server() {
 	group=$1
 	config_get strategy "$group" strategy auto
 	config_get fixed "$group" server
+	pool=""; config_list_foreach "$group" pool add_pool
+	[ -n "$pool" ] || pool=$_servers
 	now=$(date +%s); CHOOSE_REASON=fastest; CHOOSE_SCORE=999999
 	if [ -f "$OVERRIDES" ]; then
-		override=$(awk -F '\t' -v group="$group" -v now="$now" '$1==group && ($3==0 || $3>now) {print $2; exit}' "$OVERRIDES")
+		signature=$(route_signature "$group" | sha256sum | awk '{print $1}')
+		override=$(awk -F '\t' -v group="$group" -v now="$now" -v signature="$signature" '$1==group && ($3==0 || $3>now) && $4==signature {print $2; exit}' "$OVERRIDES")
 		if [ -n "$override" ]; then
 			if [ "$override" = auto ]; then CHOOSE_REASON=automatic; else
+				server_eligible "$override" || return 0
 				CHOOSE_REASON=override; CHOOSE_SCORE=$(health_field "$override" 6); printf '%s\t%s\t%s' "$override" "$CHOOSE_REASON" "$CHOOSE_SCORE"; return
 			fi
 		fi
@@ -217,47 +285,30 @@ choose_server() {
 	# shellcheck disable=SC2154
 	if [ "$strategy" = manual ] && [ -n "$fixed" ]; then
 		CHOOSE_REASON=manual; CHOOSE_SCORE=$(health_field "$fixed" 6)
-		[ -n "$(server_field "$fixed" 3)" ] && printf '%s\t%s\t%s' "$fixed" "$CHOOSE_REASON" "$CHOOSE_SCORE"
-		return
+		pool=$fixed
+		server_eligible "$fixed" && printf '%s\t%s\t%s' "$fixed" "$CHOOSE_REASON" "$CHOOSE_SCORE"
+		return 0
 	fi
-	pool=""; config_list_foreach "$group" pool add_pool
-	[ -n "$pool" ] || pool=$_servers
+	metric=latency
 	config_get metric "$group" metric latency
 	config_get primary "$group" primary
-	if [ "$strategy" = priority ] && [ -n "$primary" ] && [ "$(health_field "$primary" 2)" = up ]; then
+	if [ "$strategy" = priority ] && [ -n "$primary" ] && server_eligible "$primary" && [ "$(health_field "$primary" 7)" = 0 ]; then
 		CHOOSE_REASON=primary; CHOOSE_SCORE=$(health_field "$primary" 6); printf '%s\t%s\t%s' "$primary" "$CHOOSE_REASON" "$CHOOSE_SCORE"; return
 	fi
 	best=""; best_score=99999999
 	healthy=""
 	for id in $pool; do
-		if [ -f "$GROUP_HEALTH" ]; then
-			gh=$(awk -F '\t' -v g="$group" -v id="$id" '$1==g && $2==id {print $3 " " $5; exit}' "$GROUP_HEALTH")
-			gh_state=${gh%% *}; gh_at=${gh##* }
-			case "$gh_at" in ''|*[!0-9]*) gh_at=0;; esac
-			[ "$gh_state" = fail ] && [ "$((now - gh_at))" -lt 900 ] && continue
-		fi
-		lat=$(awk -F '\t' -v id="$id" '$1==id && $2=="up" {print ($6 ? $6 : $3); exit}' "$HEALTH")
-		[ -n "$lat" ] || continue
+		[ "$(health_field "$id" 7)" = 0 ] || continue
+		server_eligible "$id" || continue
+		score=$(server_score "$id") || continue
 		healthy="${healthy}${healthy:+ }$id"
-		prio=$(server_field "$id" 7); case "$prio" in ''|*[!0-9]*) prio=0;; esac
-		case "$metric" in
-			speed)
-			spd=$(health_field "$id" 9); case "$spd" in ''|*[!0-9]*) spd=0;; esac
-			[ "$spd" -gt 0 ] && score=$((100000000 / spd + prio)) || score=$((lat + prio))
-			;;
-			reliability)
-			success=$(health_field "$id" 10); case "$success" in ''|*[!0-9]*) success=0;; esac
-			score=$(((100 - success) * 10000 + lat + prio))
-			;;
-			*) score=$((lat + prio));;
-		esac
 		if [ "$score" -lt "$best_score" ]; then best=$id; best_score=$score; fi
 	done
 	if [ "$strategy" = balanced ] && [ -n "$healthy" ]; then
-		count=$(printf '%s\n' $healthy | wc -l | tr -d ' ')
+		count=$(printf '%s\n' "$healthy" | tr ' ' '\n' | wc -l | tr -d ' ')
 		hash=$(printf '%s' "$group" | cksum | cut -d' ' -f1)
 		wanted=$((hash % count + 1))
-		best=$(printf '%s\n' $healthy | sed -n "${wanted}p")
+		best=$(printf '%s\n' "$healthy" | tr ' ' '\n' | sed -n "${wanted}p")
 		best_score=$(health_field "$best" 6); CHOOSE_REASON=balanced
 	fi
 	current=""; changed=0
@@ -267,10 +318,8 @@ choose_server() {
 	fi
 	case "$changed" in ''|*[!0-9]*) changed=0;; esac
 	if [ "$strategy" != balanced ] && [ -n "$best" ] && [ -n "$current" ] && [ "$current" != "$best" ]; then
-		current_lat=$(awk -F '\t' -v id="$current" '$1==id && $2=="up" {print ($6 ? $6 : $3); exit}' "$HEALTH")
-		if [ -n "$current_lat" ]; then
-			current_prio=$(server_field "$current" 7); case "$current_prio" in ''|*[!0-9]*) current_prio=0;; esac
-			current_score=$((current_lat + current_prio))
+		if server_eligible "$current" && [ "$(health_field "$current" 7)" = 0 ]; then
+			current_score=$(server_score "$current")
 			config_get threshold "$group" switch_threshold
 			config_get cooldown "$group" switch_cooldown
 			[ -n "$threshold" ] || config_get threshold main switch_threshold 15
@@ -325,21 +374,34 @@ check_group_target() {
 	group=$1; selected=$2; now=$3
 	config_get url "$group" control_url
 	[ -n "$url" ] || return 0
-	last=0; [ -f "$GROUP_HEALTH" ] && last=$(awk -F '\t' -v g="$group" '$1==g {print $5; exit}' "$GROUP_HEALTH")
+	last=0; [ -f "$GROUP_HEALTH" ] && last=$(awk -F '\t' -v g="$group" -v id="$selected" 'NF>=8 && $1==g && $2==id {print $5; exit}' "$GROUP_HEALTH")
 	case "$last" in ''|*[!0-9]*) last=0;; esac
 	[ "$((now - last))" -ge 900 ] || return 0
 	[ -s "$OUTDIR/$selected/device" ] || return 0
 	dev=$(cat "$OUTDIR/$selected/device")
-	seconds=$(curl -4 -k -fsS -I -o /dev/null --interface "$dev" --connect-timeout 3 --max-time 6 -w '%{time_total}' "$url" 2>/dev/null || true)
+	probe=$(curl -4 -sS -I -o /dev/null --interface "$dev" --connect-timeout 3 --max-time 6 -w '%{http_code} %{time_total}' "$url" 2>/dev/null) && connected=1 || connected=0
+	code=${probe%% *}; seconds=${probe#* }
 	ms=$(awk -v s="${seconds:-0}" 'BEGIN { if (s > 0) printf "%.0f", s * 1000; else print 0 }')
-	[ "$ms" -gt 0 ] && state=ok || state=fail
+	state=fail
+	if [ "$connected" = 1 ]; then
+		case "$code" in
+			2??|3??) state=ok;;
+			401|403|429) state=restricted;;
+		esac
+	fi
+	site_failures=0
+	if [ "$state" = fail ]; then
+		site_failures=$(awk -F '\t' -v g="$group" -v id="$selected" '$1==g && $2==id {print $7+0; exit}' "$GROUP_HEALTH" 2>/dev/null || true)
+		site_failures=$((${site_failures:-0} + 1))
+	fi
 	: > "$GROUP_HEALTH.new"
 	[ -f "$GROUP_HEALTH" ] && awk -F '\t' -v g="$group" '$1!=g' "$GROUP_HEALTH" >> "$GROUP_HEALTH.new"
-	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$group" "$selected" "$state" "$ms" "$now" "$url" >> "$GROUP_HEALTH.new"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$group" "$selected" "$state" "$ms" "$now" "$url" "$site_failures" "$code" >> "$GROUP_HEALTH.new"
 	mv "$GROUP_HEALTH.new" "$GROUP_HEALTH"
 }
 
 apply_selection() {
+	prune_overrides
 	: > "$SELECTION.new"
 	transaction="$OUTDIR/selection.nft"
 	: > "$transaction"
@@ -391,14 +453,17 @@ resolve_host() {
 
 emit_domain() {
 	d=$1; [ -n "$d" ] || return 0
-	printf '%s\n' "$d" | "$LIBDIR/normalize" 2>/dev/null | while IFS= read -r normalized; do
-		printf 'nftset=/%s/4#inet#%s#%s\n' "$normalized" "$TABLE_NAME" "$set4" >> "$OUTDIR/dnsmasq.conf"
-		printf 'nftset=/%s/6#inet#%s#%s\n' "$normalized" "$TABLE_NAME" "$set6" >> "$OUTDIR/dnsmasq.conf"
+	printf '%s\n' "$d" | "$LIBDIR/normalize" 2>/dev/null | emit_normalized_domains
+}
+emit_normalized_domains() {
+	while IFS= read -r normalized; do
+		printf 'nftset=/%s/4#inet#%s#%s\n' "$normalized" "$TABLE_NAME" "$set4" >> "$DNSCONF"
+		printf 'nftset=/%s/6#inet#%s#%s\n' "$normalized" "$TABLE_NAME" "$set6" >> "$DNSCONF"
 	done
 }
 emit_source() {
 	f="$LISTSDIR/$1"; [ -f "$f" ] || { log "list not found: $1"; return 0; }
-	"$LIBDIR/normalize" < "$f" 2>/dev/null | while IFS= read -r d; do emit_domain "$d"; done
+	"$LIBDIR/normalize" < "$f" 2>/dev/null | emit_normalized_domains
 	case "$f" in
 		*.lst) extra="${f%.lst}.cidr"; [ -s "$extra" ] && emit_subnet "${1%.lst}.cidr" ;;
 	esac
@@ -407,8 +472,8 @@ emit_subnet() {
 	f="$LISTSDIR/$1"; [ -f "$f" ] || return 0
 	sed -e 's/#.*//' -e 's/[[:space:]]//g' "$f" | grep -v '^$' | while IFS= read -r c; do
 		case "$c" in
-			*:*) $NFT add element inet "$TABLE_NAME" "$set6" "{ $c }" 2>/dev/null || log "rejected IPv6 subnet: $c";;
-			*) $NFT add element inet "$TABLE_NAME" "$set4" "{ $c }" 2>/dev/null || log "rejected IPv4 subnet: $c";;
+			*:*) printf 'add element inet %s %s { %s }\n' "$TABLE_NAME" "$set6" "$c" >> "$SUBNETS";;
+			*) printf 'add element inet %s %s { %s }\n' "$TABLE_NAME" "$set4" "$c" >> "$SUBNETS";;
 		esac
 	done
 }
@@ -441,26 +506,39 @@ publish_dnsmasq() {
 	if [ ! -f "$OUTDIR/dnsmasq.loaded" ] || ! cmp -s "$OUTDIR/dnsmasq.conf" "$OUTDIR/dnsmasq.loaded"; then
 		cp "$OUTDIR/dnsmasq.conf" "$OUTDIR/dnsmasq.loaded"
 		$DNSMASQ_INIT restart >/dev/null 2>&1
-	else
-		# build_routing() recreates the nft table, so all dynamically learned
-		# addresses disappear even when the domain mapping did not change.
-		# OpenWrt's dnsmasq reload keeps cached answers, so they are not added
-		# to the new sets. Restart only when routing is rebuilt; health checks
-		# never call this path.
-		$DNSMASQ_INIT restart >/dev/null 2>&1
 	fi
 }
 
 build_routing() {
 	rules="$OUTDIR/rules.nft"
+	DNSCONF="$OUTDIR/dnsmasq.next"
+	SUBNETS="$OUTDIR/subnets.next"
+	: > "$DNSCONF"; : > "$SUBNETS"
+	wanted=" endpoints4 endpoints6 prerouting "
+	for group in $_groups; do
+		set4=$(group_set "$group" 4); set6=$(group_set "$group" 6)
+		wanted="$wanted$set4 $set6 $(route_chain "$group") "
+		config_list_foreach "$group" domain emit_domain || true
+		config_list_foreach "$group" source emit_source || true
+		config_list_foreach "$group" subnet emit_subnet || true
+	done
+	# A table declaration merges existing objects: it does not clear sets.
+	# Only the dispatch chain is replaced, within one atomic transaction.
+	$NFT list table inet "$TABLE_NAME" > "$rules.previous" 2>/dev/null || : > "$rules.previous"
 	{
-		echo "table inet $TABLE_NAME { }"; echo "delete table inet $TABLE_NAME"; echo "table inet $TABLE_NAME {"
+		if [ -s "$rules.previous" ]; then echo "flush chain inet $TABLE_NAME prerouting"; fi
+		echo "table inet $TABLE_NAME {"
 		echo ' set endpoints4 { type ipv4_addr; flags interval; }'
 		echo ' set endpoints6 { type ipv6_addr; flags interval; }'
 		for group in $_groups; do
 			echo " set $(group_set "$group" 4) { type ipv4_addr; flags interval; auto-merge; }"
 			echo " set $(group_set "$group" 6) { type ipv6_addr; flags interval; auto-merge; }"
-			echo " chain $(route_chain "$group") { }"
+			chain=$(route_chain "$group")
+			if awk -v name="$chain" '$1=="chain" && $2==name { found=1 } END { exit !found }' "$rules.previous"; then
+				echo " chain $chain { }"
+			else
+				echo " chain $chain { drop; }"
+			fi
 		done
 		echo ' chain prerouting {'
 		echo '  type filter hook prerouting priority mangle; policy accept;'
@@ -475,14 +553,37 @@ build_routing() {
 			echo '  meta mark != 0 return'
 		done
 			echo ' }'; echo '}'
+		# Removed groups must leave neither dispatch chains nor learned sets.
+		awk '$1=="chain" || $1=="set" { print $1 ":" $2 }' "$rules.previous" |
+		while IFS=: read -r kind name; do
+			case "$wanted" in *" $name "*) continue;; esac
+			printf 'delete %s inet %s %s\n' "$kind" "$TABLE_NAME" "$name"
+		done
+		# Additions retain learned IPs. Removing a mapping clears only the
+		# affected group's sets so deleted domains cannot keep using the VPN.
+		for previous in "$OUTDIR/dnsmasq.conf" "$OUTDIR/subnets.nft"; do
+			[ -f "$previous" ] || continue
+			case "$previous" in *.conf) next=$DNSCONF;; *) next=$SUBNETS;; esac
+			awk 'FILENAME==ARGV[1] { old[$0]=1; next } { delete old[$0] }
+				END { for (line in old) {
+					if (line ~ /^nftset=/) { split(line,p,"#"); sets[p[4]]=1 }
+					else if (line ~ /^add element /) { split(line,p," "); sets[p[5]]=1 }
+				} for (set in sets) print set }' "$previous" "$next" |
+			while IFS= read -r affected; do
+				case "$wanted" in *" $affected "*) printf 'flush set inet %s %s\n' "$TABLE_NAME" "$affected";; esac
+			done
+		done
+		echo "flush set inet $TABLE_NAME endpoints4"
+		echo "flush set inet $TABLE_NAME endpoints6"
+		cat "$SUBNETS"
 	} > "$rules"
 	nft_check_file "$rules" || { log 'routing rules validation failed'; return 1; }
-	$NFT list table inet "$TABLE_NAME" > "$rules.previous" 2>/dev/null || : > "$rules.previous"
 	if ! $NFT -f "$rules"; then
-		[ -s "$rules.previous" ] && $NFT -f "$rules.previous" >/dev/null 2>&1 || true
-		log 'routing update failed; previous rules restored'
+		log 'routing update failed; existing rules retained'
 		return 1
 	fi
+	mv "$DNSCONF" "$OUTDIR/dnsmasq.conf"
+	mv "$SUBNETS" "$OUTDIR/subnets.nft"
 
 	_add_endpoint_addr() {
 		resolve_host "$(host_of "$1")" | while IFS= read -r addr; do
@@ -494,13 +595,6 @@ build_routing() {
 	}
 	for id in $_servers; do config_list_foreach "$id" address _add_endpoint_addr; done
 
-	: > "$OUTDIR/dnsmasq.conf"
-	for group in $_groups; do
-		set4=$(group_set "$group" 4); set6=$(group_set "$group" 6)
-		config_list_foreach "$group" domain emit_domain || true
-		config_list_foreach "$group" source emit_source || true
-		config_list_foreach "$group" subnet emit_subnet || true
-	done
 	publish_dnsmasq
 }
 
@@ -552,7 +646,7 @@ cmd=${1:-status}
 if [ "$cmd" = select ]; then RUN_SITE_CHECKS=1; fi
 locked=0
 case "$cmd" in
-	prepare|select|override)
+	prepare|reload|select|override)
 		mkdir -p "${LOCKDIR%/*}"
 		tries=0
 		while ! mkdir "$LOCKDIR" 2>/dev/null; do
@@ -573,7 +667,19 @@ case "$cmd" in
 		[ -n "$_servers" ] || { echo 'no enabled server sections' >&2; exit 1; }
 		[ -n "$_groups" ] || { echo 'no enabled group sections' >&2; exit 1; }
 		mkdir -p "$OUTDIR"; write_servers; ensure_lists; prepare_servers; build_routing; refresh_health; apply_selection
+		umask 077
+		client_snapshot > "$OUTDIR/client-settings.uci"
 		trap - 0; rmdir "$LOCKDIR" 2>/dev/null || true; locked=0
+		;;
+	reload)
+		umask 077
+		client_snapshot > "$OUTDIR/client-settings.next"
+		if [ ! -f "$OUTDIR/client-settings.uci" ] || ! cmp -s "$OUTDIR/client-settings.uci" "$OUTDIR/client-settings.next"; then
+			rm -f "$OUTDIR/client-settings.next"
+			exit 10
+		fi
+		rm -f "$OUTDIR/client-settings.next"
+		ensure_lists; build_routing; apply_selection
 		;;
 	select) mkdir -p "$OUTDIR"; [ -f "$OUTDIR/servers.tsv" ] || write_servers; refresh_health; apply_selection ;;
 	override)
@@ -583,7 +689,8 @@ case "$cmd" in
 		until_ts=0; [ "$server" = auto ] || until_ts=$(($(date +%s) + duration))
 		mkdir -p "$OUTDIR"; : > "$OVERRIDES.new"
 		[ -f "$OVERRIDES" ] && awk -F '\t' -v group="$group" '$1!=group' "$OVERRIDES" >> "$OVERRIDES.new"
-		[ "$server" = auto ] || printf '%s\t%s\t%s\n' "$group" "$server" "$until_ts" >> "$OVERRIDES.new"
+		signature=$(route_signature "$group" | sha256sum | awk '{print $1}')
+		[ "$server" = auto ] || printf '%s\t%s\t%s\t%s\n' "$group" "$server" "$until_ts" "$signature" >> "$OVERRIDES.new"
 		mv "$OVERRIDES.new" "$OVERRIDES"
 		[ -f "$OUTDIR/servers.tsv" ] || write_servers
 		refresh_health; apply_selection

@@ -61,6 +61,12 @@ cat > "$TT_TEST_TMP/bin/client" <<'EOF'
 exit 0
 EOF
 chmod +x "$TT_TEST_TMP/bin/"*
+cat > "$TT_TEST_TMP/bin/uci" <<'EOF'
+#!/bin/sh
+[ "$1" = export ] && printf 'config main main\n\toption multi_server 1\n'
+exit 0
+EOF
+chmod +x "$TT_TEST_TMP/bin/uci"
 
 PATH="$TT_TEST_TMP/bin:$PATH" TT_FUNCTIONS="$stub" \
 	TT_LIBDIR="$root/packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel" \
@@ -89,8 +95,20 @@ PATH="$TT_TEST_TMP/bin:$PATH" TT_FUNCTIONS="$stub" TT_DEVICE_ROUTING=1 \
 assert_contains "$(cat "$TT_TEST_TMP/nft.log")" \
 	'add rule inet trusttunnel_multi r_grp_video ip saddr 192.168.1.20 drop' \
 	"device routing limits the group killswitch to the assigned source"
-assert_contains "$(cat "$TT_TEST_TMP/dns-init.log")" 'restart' \
-	"unchanged mappings restart dnsmasq after recreating nft sets"
+assert_eq '' "$(cat "$TT_TEST_TMP/dns-init.log")" \
+	"unchanged mappings preserve DNS cache without restarting dnsmasq"
+
+: > "$TT_TEST_TMP/ip.log"
+PATH="$TT_TEST_TMP/bin:$PATH" TT_FUNCTIONS="$stub" TT_DEVICE_ROUTING=1 \
+	TT_LIBDIR="$root/packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel" \
+	TT_MULTI_OUT="$TT_TEST_TMP/out" TT_LISTS_DIR="$TT_TEST_TMP/lists" \
+	TT_IP="$TT_TEST_TMP/bin/ip" TT_NFT="$TT_TEST_TMP/bin/nft" \
+	TT_CLIENT="$TT_TEST_TMP/bin/client" TT_DNSMASQ_INIT="$TT_TEST_TMP/bin/dns-init" \
+	TT_DNS_DIR="$TT_TEST_TMP/dns" \
+	sh "$root/packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-manager" reload
+assert_eq '' "$(cat "$TT_TEST_TMP/ip.log")" "group reload keeps existing tunnel policy routes"
+printf 'changed server settings\n' > "$TT_TEST_TMP/out/client-settings.uci"
+assert_exit 10 'changed client configuration requires a full restart' env PATH="$TT_TEST_TMP/bin:$PATH" TT_FUNCTIONS="$stub" TT_MULTI_OUT="$TT_TEST_TMP/out" TT_LIBDIR="$root/packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel" sh "$root/packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-manager" reload
 
 cat > "$TT_TEST_TMP/bin/dnsmasq" <<'EOF'
 #!/bin/sh

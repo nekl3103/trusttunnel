@@ -303,7 +303,7 @@ cmd_run() {
 	else
 		measure_path tunnel
 	fi
-	put phase done
+	put phase 'done'
 	rm -f "$DIR/live"
 }
 

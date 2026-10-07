@@ -64,6 +64,62 @@ const RELEASE_TTL = 21600;
 
 // sh() склеивает stderr в stdout: нужно там, где текст ошибки сам является
 // результатом (управление службой, лог, импорт).
+// BEGIN deep-link compatibility adapter
+function wizard_deeplink(link) {
+	const malformed = 'Ссылка TrustTunnel повреждена. Скопируйте её заново из конфигурации сервера.';
+	let encoded = substr(link, 6);
+	if (!match(link, /^tt:\/\/\?[A-Za-z0-9_-]+$/i)) return { error: malformed };
+	let base64 = replace(replace(encoded, /-/g, '+'), /_/g, '/');
+	while (length(base64) % 4) base64 += '=';
+	let data;
+	try { data = b64dec(base64); } catch (e) { return { error: malformed }; }
+	if (data == null) return { error: malformed };
+	let offset = 0, version = null, version_offset = null, subscription = false;
+	let fields = {};
+	function varint() {
+		if (offset >= length(data)) return null;
+		let first = ord(data, offset), count = 1 << (first >> 6);
+		if (count > length(data) - offset) return null;
+		let value = first & 63;
+		for (let i = 1; i < count; i++) value = value * 256 + ord(data, offset + i);
+		offset += count;
+		return value;
+	}
+	while (offset < length(data)) {
+		let tag = varint(), size = varint();
+		if (tag == null || size == null || size > length(data) - offset)
+			return { error: malformed };
+		let value = substr(data, offset, size);
+		if (tag == 0) {
+			if (version != null || size != 1) return { error: malformed };
+			version = ord(value); version_offset = offset;
+		} else if ((tag == 1 || tag == 2 || tag == 5 || tag == 6) && size) {
+			fields[sprintf('%d', tag)] = true;
+		} else if (tag == 11 && size) {
+			let parts = split(value, '/');
+			if (length(parts) < 1 || length(parts) > 2) return { error: malformed };
+			for (let part in parts)
+				if (!length(part) || length(part) > 64 || length(part) % 2 ||
+				    !match(part, /^[a-f0-9]+$/i)) return { error: malformed };
+			if (length(parts) == 2 && length(parts[0]) != length(parts[1]))
+				return { error: malformed };
+		}
+		if (tag == 14) subscription = true;
+		offset += size;
+	}
+	if (version == null) return { error: malformed };
+	if (version != 1 && version != 2)
+		return { error: 'Эта версия ссылки TrustTunnel пока не поддерживается.' };
+	if (subscription)
+		return { error: 'Импорт подписок пока не поддерживается. Используйте полную ссылку с параметрами сервера.' };
+	if (!fields['1'] || !fields['2'] || !fields['5'] || !fields['6']) return { error: malformed };
+	if (version == 1) return { link: link };
+	// Static v2 fields share the v1 layout; keep credentials, TLS random and DNS intact.
+	data = substr(data, 0, version_offset) + chr(1) + substr(data, version_offset + 1);
+	return { link: 'tt://?' + replace(replace(replace(b64enc(data), /\+/g, '-'), /\//g, '_'), /=+$/, '') };
+}
+// END deep-link compatibility adapter
+
 function sh(cmd) {
 	let p = popen(cmd + ' 2>&1');
 	if (!p)
@@ -76,6 +132,7 @@ function sh(cmd) {
 // sh_out() отдаёт только stdout. Обязателен там, где вывод разбирается:
 // normalize пишет "dropped N" в stderr, nft и nslookup тоже могут писать
 // предупреждения, и склейка потоков превратила бы их в данные.
+
 function sh_out(cmd) {
 	let p = popen(cmd + ' 2>/dev/null');
 	if (!p)
@@ -89,6 +146,19 @@ function shq(s) {
 	// Одинарные кавычки в оболочке: закрыть, вставить экранированную, открыть.
 	return "'" + replace('' + s, "'", "'\\''") + "'";
 }
+
+// Query procd directly: rc.common's running verb takes the init lock, which
+// is held throughout a long restart and can block the periodic LuCI poll.
+function service_running() {
+	let result = sh_out('ubus call service list ' + shq('{"name":"trusttunnel"}'));
+	try {
+		let services = json(result.out);
+		for (let name, instance in services?.trusttunnel?.instances ?? {})
+			if (instance.running) return true;
+	} catch (e) { }
+	return false;
+}
+
 
 // Непредсказуемое имя во временном каталоге плюс mode 600 сразу после
 // записи. Эти файлы пишутся от root в /tmp — каталоге с правами на запись
@@ -379,7 +449,7 @@ function multi_runtime() {
 		if (length(p) >= 2) selected[p[0]] = { server: p[1], changed: +(p[2] ?? 0), reason: p[3] ?? '', score: +(p[4] ?? 0) };
 	}
 	for (let line in split(readfile(base + '/overrides.tsv') ?? '', '\n')) {
-		let p = split(line, '\t'); if (length(p) >= 3) overrides[p[0]] = { server: p[1], until: +p[2] };
+		let p = split(line, '\t'); if (length(p) >= 3 && (+p[2] == 0 || +p[2] > time())) overrides[p[0]] = { server: p[1], until: +p[2] };
 	}
 	for (let line in split(readfile(base + '/history.tsv') ?? '', '\n')) {
 		let p = split(line, '\t'); if (length(p) < 6) continue;
@@ -388,7 +458,7 @@ function multi_runtime() {
 	}
 	for (let line in split(readfile(base + '/group-health.tsv') ?? '', '\n')) {
 		let p = split(line, '\t'); if (length(p) >= 5) groupHealth[p[0]] = {
-			server: p[1], state: p[2], latency: +p[3], checked: +p[4], url: p[5] ?? ''
+			server: p[1], state: p[2], latency: +p[3], checked: +p[4], url: p[5] ?? '', http_code: +(p[7] ?? 0)
 		};
 	}
 	for (let line in split(readfile(base + '/switch-history.tsv') ?? '', '\n')) {
@@ -427,6 +497,7 @@ function multi_runtime() {
 			id: p[0], name: uciget('trusttunnel.' + p[0] + '.name') || p[0],
 			server: p[1] == '-' ? null : p[1], changed: +(p[2] ?? 0), reason: p[3] ?? '',
 			score: +(p[4] ?? 0), strategy: uciget('trusttunnel.' + p[0] + '.strategy') || 'auto',
+			configured_server: uciget('trusttunnel.' + p[0] + '.server') || null,
 			override: overrides[p[0]] ?? null, check: groupHealth[p[0]] ?? null
 		});
 	}
@@ -450,7 +521,7 @@ function multi_device(server) {
 function multi_diagnose(wanted) {
 	let checks = [], mr = multi_runtime();
 	let enabled = uciget('trusttunnel.main.enabled') == '1';
-	let running = sh('/etc/init.d/trusttunnel running').code == 0;
+	let running = service_running();
 	function add(group, label, status, detail, hint) {
 		push(checks, { group: group, label: label, status: status,
 			detail: detail ?? '', hint: hint ?? '' });
@@ -517,7 +588,7 @@ return {
 			let rec = records();
 			let rs = routing_status();
 			let multi = uciget('trusttunnel.main.multi_server') == '1';
-			let running = sh('/etc/init.d/trusttunnel running').code == 0;
+			let running = service_running();
 			// Do not present cached runtime files as live subscriptions after the
 			// service has stopped. The configured profiles remain on Settings.
 			let mr = multi && running ? multi_runtime() : { servers: [], groups: [], switches: [] };
@@ -529,9 +600,12 @@ return {
 			let any_up = false;
 			for (let s in mr.servers) if (s.state == 'up' && length(s.device)) any_up = true;
 			let updated = trim(readfile(LISTS_UPDATED) ?? '');
+			let action_pid = trim(readfile('/var/run/trusttunnel-actions/lock/pid') ?? '');
+			let action_pending = match(action_pid, /^[0-9]+$/) && sh('kill -0 ' + action_pid).code == 0;
 			return {
 				enabled: uciget('trusttunnel.main.enabled') == '1',
 				running: running,
+				operation_pending: !!action_pending,
 				mode: first(rec, 'main.mode', 'selective'),
 				multi_server: multi,
 				device_routing: uciget('trusttunnel.main.device_routing') == '1',
@@ -561,33 +635,29 @@ return {
 			let a = req.args?.action ?? 'restart';
 			if (!(a in [ 'start', 'stop', 'restart', 'reload', 'update_lists' ]))
 				return { error: 'unsupported action' };
-			let r = sh('/etc/init.d/trusttunnel ' + a);
-			// procd's `start` verb does not propagate start_service()'s exit
-			// status — that belongs to rc.common's generic start(), not to
-			// this init script, so it is not ours to change. Every
-			// precondition start_service checks (disabled in configuration,
-			// missing client binary, trust store setup, config generation,
-			// routing setup) logs a specific reason and returns non-zero,
-			// but `start` itself still reports 0. Without this check the
-			// interface would say the action succeeded while nothing is
-			// running.
-			//
-			// `running` is the same mechanism status() uses to report
-			// whether the service is up, so this asks procd directly rather
-			// than trusting the wrapper's exit code.
-			if (a == 'start') {
-				// A precondition failure returns from start_service before
-				// procd_open_instance ever runs, so `running` already
-				// reflects it immediately. A successful start still needs a
-				// brief moment for procd to actually fork and exec the
-				// client after procd_close_instance hands the instance off
-				// — this sleep is only to cover that handoff, not to wait
-				// out anything of ours.
-				sh('sleep 1');
-				if (sh('/etc/init.d/trusttunnel running').code != 0)
-					return { code: 1, output: r.out, not_running: true };
+			let r = sh(LIBDIR + '/service-action enqueue ' + shq(a));
+			return r.code == 0
+				? { code: 0, pending: true, job: trim(r.out) }
+				: { code: r.code, output: r.out };
+		}
+	},
+
+	service_result: {
+		args: { job: '' },
+		call: function(req) {
+			let job = req.args?.job ?? '';
+			if (!match(job, /^[0-9]+-[0-9]+$/))
+				return { code: 1, output: 'Invalid operation' };
+			let base = '/var/run/trusttunnel-actions/' + job;
+			let result = readfile(base + '/result');
+			if (result == null) {
+				let pid = trim(readfile(base + '/pid') ?? '');
+				if (match(pid, /^[0-9]+$/) && sh('kill -0 ' + pid).code == 0)
+					return { pending: true, job: job };
+				return { code: 1, output: 'Service operation was interrupted. Check the client log.' };
 			}
-			return { code: r.code, output: r.out };
+			return { code: +trim(result), output: readfile(base + '/output') ?? '',
+				not_running: access(base + '/not-running') };
 		}
 	},
 
@@ -905,14 +975,17 @@ return {
 	},
 
 	geosite_catalog: {
-		args: { refresh: false },
+		args: { refresh: false, names: '' },
 		call: function(req) {
+			let names = req.args?.names ? split(req.args.names, ',') : null;
+			if (names && length(names) == 1 && names[0] == '-') return { items: [], updated: 0 };
 			let refresh = req.args?.refresh ? ' refresh' : '';
 			let r = sh_out(LIBDIR + '/geosite-sync catalog' + refresh);
 			if (r.code != 0) return { error: 'could not load geosite catalog' };
 			let items = [];
 			for (let line in split(r.out, '\n')) {
 				let p = split(line, '\t');
+				if (names && index(names, p[0]) < 0) continue;
 				if (length(p) >= 2) push(items, { name: p[0], count: +p[1], applied: +(p[2] ?? p[1]), ignored: +(p[3] ?? 0) });
 			}
 			let updated = trim(readfile('/usr/share/trusttunnel/geosite.updated') ?? '');
@@ -925,7 +998,13 @@ return {
 		call: function(req) {
 			let n = req.args?.lines ?? 100;
 			let r = sh('logread -e trusttunnel | tail -n ' + int(n));
-			return { lines: split(trim(r.out), '\n') };
+			let lines = split(trim(r.out), '\n'), start = 0, last_error = null;
+			for (let i = 0; i < length(lines); i++)
+				if (match(lines[i], /panel monitoring started|multi-server mode started/)) start = i;
+			let current = slice(lines, start);
+			for (let line in current)
+				if (match(line, /\.(err|crit|alert|emerg) |error:|fatal|health refresh failed/)) last_error = line;
+			return { lines: current, history: slice(lines, 0, start), last_error: last_error };
 		}
 	},
 
@@ -952,7 +1031,7 @@ return {
 			// нет. null означает, что клиент его ещё не создал.
 			let dev = rs.device;
 			let enabled = uciget('trusttunnel.main.enabled') == '1';
-			let running = sh('/etc/init.d/trusttunnel running').code == 0;
+			let running = service_running();
 
 			function add(group, label, status, detail, hint) {
 				push(checks, {
@@ -1431,10 +1510,12 @@ return {
 			let trimmed = trim(text);
 			let inp = null;
 			let cmd;
-			if (wildcard(trimmed, 'tt://*')) {
+			if (match(trimmed, /^tt:\/\//i)) {
+				let adapted = wizard_deeplink(trimmed);
+				if (adapted.error) return { error: adapted.error };
 				// Ссылка идёт аргументом, а не файлом; shq() обязателен —
 				// в ней встречаются символы, значимые для оболочки.
-				cmd = wiz + ' --mode non-interactive --deeplink ' + shq(trimmed) +
+				cmd = wiz + ' --mode non-interactive --deeplink ' + shq(adapted.link) +
 					' --settings ' + shq(outp);
 			} else {
 				inp = write_secret_tmp('import-in', text);

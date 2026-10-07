@@ -624,17 +624,12 @@ start_multi_service() {
 	config_foreach _migrate_secret server
 	setup_multi_trust_store || return 1
 
-	if ! "$LIBDIR/multi-manager" prepare; then
-		if [ -s /etc/trusttunnel/last-good.uci ]; then
-			logger -t trusttunnel "warning: new configuration failed; restoring last known working configuration"
-			uci -q revert trusttunnel
-			uci import trusttunnel < /etc/trusttunnel/last-good.uci && uci commit trusttunnel || return 1
-			config_load trusttunnel
-			"$LIBDIR/multi-manager" prepare || { logger -t trusttunnel "error: rollback configuration also failed"; return 1; }
-		else
-			logger -t trusttunnel "error: multi-server preparation failed"
-			return 1
-		fi
+	mkdir -p "$OUTDIR" || return 1
+	if ! "$LIBDIR/multi-manager" prepare > "$OUTDIR/prepare.log" 2>&1; then
+		while IFS= read -r _error; do logger -t trusttunnel "$_error"; done < "$OUTDIR/prepare.log"
+		cat "$OUTDIR/prepare.log" >&2
+		logger -t trusttunnel "error: multi-server preparation failed; saved settings have been preserved"
+		return 1
 	fi
 
 	while IFS="$(printf '\t')" read -r _id _dev _mark _table _host _port _priority; do
@@ -978,6 +973,21 @@ restart() {
 # неизвестном состоянии, и оставить всё как есть значило бы показывать
 # работающую службу поверх недогруженной таблицы.
 apply_settings() {
+	if [ "$(uci -q get trusttunnel.main.multi_server)" = 1 ] && running >/dev/null 2>&1; then
+		_multi_reload_rc=0
+		"$LIBDIR/multi-manager" reload || _multi_reload_rc=$?
+		case "$_multi_reload_rc" in
+			0)
+				logger -t trusttunnel "group settings applied without restarting clients"
+				return 0
+				;;
+			10) restart; return $?;;
+			*)
+				logger -t trusttunnel "settings reload failed (exit $_multi_reload_rc); keeping running clients"
+				return "$_multi_reload_rc"
+				;;
+		esac
+	fi
 	# Сравнивать не с чем — это обычный старт, а не применение поверх
 	# известного состояния. /var на OpenWrt в tmpfs, поэтому после
 	# перезагрузки записи нет вовсе. То же и для остановленной службы.

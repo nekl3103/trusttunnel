@@ -1,0 +1,62 @@
+#!/bin/sh
+# Detach long-running init operations from the RPC request. Results survive
+# navigation away from LuCI; serialize actions so a second click cannot race.
+set -u
+STATE=${TT_ACTION_STATE:-/var/run/trusttunnel-actions}
+INIT=${TT_ACTION_INIT:-/etc/init.d/trusttunnel}
+umask 077
+case "${2:-}" in start|stop|restart|reload|update_lists) action=$2;; *) exit 2;; esac
+mkdir -p "$STATE" || exit 1
+case "${1:-}" in
+enqueue)
+	if ! mkdir "$STATE/lock" 2>/dev/null; then
+		pid=$(cat "$STATE/lock/pid" 2>/dev/null || true)
+		case "$pid" in ''|*[!0-9]*) pid=0;; esac
+		if [ "$pid" = 0 ] || kill -0 "$pid" 2>/dev/null; then
+			echo 'Another service operation is still running.'; exit 1
+		fi
+		rm -f "$STATE/lock/pid"
+		rmdir "$STATE/lock" 2>/dev/null || exit 1
+		mkdir "$STATE/lock" 2>/dev/null || exit 1
+	fi
+	job="$(date +%s)-$$"
+	mkdir "$STATE/$job" || { rmdir "$STATE/lock"; exit 1; }
+	# Detach all descriptors, including stdin and the RPC output pipe.
+	sh "$0" run "$action" "$job" < /dev/null > "$STATE/$job/output" 2>&1 &
+	pid=$!
+	printf '%s\n' "$pid" > "$STATE/$job/pid"
+	printf '%s\n' "$pid" > "$STATE/lock/pid"
+	printf '%s\n' "$job"
+	;;
+run)
+	job=${3:?missing job}
+	# Wait until enqueue has published ownership before releasing the lock.
+	while [ ! -s "$STATE/lock/pid" ]; do sleep 1; done
+	# Invoked by the EXIT trap.
+	# shellcheck disable=SC2329
+	finish() {
+		printf '%s\n' "$rc" > "$STATE/$job/result.new"
+		mv "$STATE/$job/result.new" "$STATE/$job/result"
+		rm -f "$STATE/lock/pid"
+		rmdir "$STATE/lock" 2>/dev/null || true
+	}
+	rc=1
+	trap 'finish' EXIT
+	trap 'rc=143; exit 143' INT TERM HUP
+	"$INIT" "$action"
+	rc=$?
+	case "$action" in
+	start|restart|reload)
+		if [ "$rc" = 0 ]; then
+			sleep 1
+			if ! "$INIT" running >/dev/null 2>&1; then
+				rc=1; touch "$STATE/$job/not-running"
+				echo 'The service did not start. Check the client log.'
+			fi
+		fi
+		;;
+	esac
+	exit "$rc"
+	;;
+*) exit 2;;
+esac

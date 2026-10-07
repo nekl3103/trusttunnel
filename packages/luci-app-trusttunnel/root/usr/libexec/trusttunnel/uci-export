@@ -65,6 +65,7 @@ listopt domains direct
 # In multi-server mode every group owns its lists. Export them through the
 # legacy aggregate keys as well so the existing secure downloader can fetch
 # and update the files without learning a second records schema.
+_multi=0
 config_get_bool _multi main multi_server 0
 if [ "$_multi" = "1" ]; then
 	_group_lists() {

@@ -1,125 +1,91 @@
 # TrustTunnel for OpenWrt
 
-[Русский](README.md) · [Releases](https://github.com/nekl3103/trusttunnel/releases) · [Detailed guide](GUIDE.en.md) · [Report a bug](https://github.com/nekl3103/trusttunnel/issues)
+[Русский](README.md) · [Releases](https://github.com/nekl3103/trusttunnel/releases) · [Guide](GUIDE.en.md) · [Issues](https://github.com/nekl3103/trusttunnel/issues)
 
-**Selected sites through a VPN, everything else direct. Configuration and diagnostics in LuCI.**
+Run TrustTunnel on your router and manage it through LuCI: multiple VPN servers, a separate exit for each site group, and routing rules for home devices. Phones, TVs and computers do not need their own VPN client.
 
-`luci-app-trusttunnel` runs the [TrustTunnel](https://github.com/TrustTunnel/TrustTunnel)
-client on your **OpenWrt 25.12+** router. Devices on your home network use the tunnel through
-the router without needing a separate VPN client on each device.
+This repository contains our OpenWrt integration: `luci-app-trusttunnel`, the installer, routing scripts, client management and tests. The VPN binary comes from [TrustTunnelClient](https://github.com/TrustTunnel/TrustTunnelClient). Configure a TrustTunnel server separately.
 
-- **Selective routing:** [itdoginfo/allow-domains](https://github.com/itdoginfo/allow-domains) lists, custom domains and exclusions.
-- **Browser-based configuration:** import a server config, select lists and manage the service in LuCI.
-- **Built-in diagnostics:** tunnel status, domain checks, endpoint ping and external IP comparison.
-- **Two modes:** route by list or send all LAN internet traffic through the VPN with exclusions; a killswitch for selected traffic.
-- **Multiple servers:** independent profiles, automatic pools and per-site-group egress selection.
+## Implemented features
 
-TrustTunnel is an open VPN protocol originally developed by AdGuard VPN,
-with HTTPS-based transport and features designed to resist DPI.
+- **Multiple servers:** configuration import including `tt://` links; a separate client process, TUN interface and routing table per enabled server. HTTP/2 and HTTP/3 (QUIC), TLS settings and pinned PEM certificates.
+- **Geosite groups:** categories from `v2fly/domain-list-community`, additional domains and automatic list updates. Settings show selected groups; the full category catalog loads on request and is cached.
+- **Per-group exit selection:** a fixed server, automatic pool selection, primary with fallback, or distribution of groups across healthy servers. Automatic selection supports latency, speed and reliability metrics.
+- **Device rules:** assign groups by IP address, subnet or MAC address. With device routing enabled, only assigned device/group pairs use the VPN; other traffic stays direct.
+- **Connection monitoring:** endpoint and tunnel checks, group control URLs, repeated-failure confirmation, switch thresholds and cooldowns. Stable connections use less frequent checks; speed measurements run separately, at most once every 30 minutes.
+- **LuCI controls:** server health, group routes, manual exit selection, client logs, service controls and list updates. Long operations run in the background with serialization.
+- **DNS and nftables:** IPv4/IPv6, DNS-based selective routing, exclusions, killswitch and DNS/DoH settings. Group route changes are atomic and preserve populated address sets.
+- **Diagnostics:** configuration and domain checks, direct/tunnel external IP comparison, speed and latency measurements.
+- **Persistent settings:** APK updates preserve the configuration; multi-server passwords are stored separately in owner-only files.
 
-**Domain list selection in LuCI**
+The generators and UCI configuration also support `itdoginfo/allow-domains` lists, custom domains and subnets. The current group settings UI uses Geosite.
 
-![TrustTunnel settings in LuCI: categories, services, subnets and automatic list updates](Screenshot_3.png)
+## Installation
 
-The screenshots show the Russian interface; the LuCI app is also available in English.
+Requirements: **OpenWrt 25.12+**, LuCI, `apk`, SSH access and your TrustTunnel server configuration. Supported client architectures: `aarch64`/`arm64`, `armv7l`/`armv8l`, `mips`, `mipsel` and `x86_64`. The installer does not support OpenWrt releases using `opkg`.
 
-## Quick start
-
-### Requirements
-
-- A router running **OpenWrt 25.12 or newer**, with LuCI and the `apk` package manager.
-- SSH access to the router and free storage for the client binary and dependencies.
-- **A TrustTunnel server and its connection config.** This package installs the router client;
-  set up the server separately using the [official instructions](https://github.com/TrustTunnel/TrustTunnel#quick-start).
-- A supported client architecture: `aarch64`, `armv7l`, `mips`, `mipsel` or `x86_64`.
-  Check yours with `uname -m`.
-
-OpenWrt 24.10 and earlier releases using `opkg` are unsupported.
-Selective routing requires `dnsmasq-full` with `nftset` support. The installer checks for it
-and asks for confirmation before replacing stock `dnsmasq`.
-
-### 1. Install
-
-Run over SSH **on the router**:
+Run on the router:
 
 ```sh
 sh -c "$(wget -O - https://raw.githubusercontent.com/nekl3103/trusttunnel/main/install.sh)"
 ```
 
-The installer checks compatibility and installs dependencies, the LuCI package and the client binary.
-Replacing `dnsmasq` with `dnsmasq-full` briefly restarts DNS.
-The service is disabled after installation so you can configure it first.
+The installer downloads the **latest published package release** and the TrustTunnel client. Changes present only in `main` become available through this command after a new release is published.
 
-### 2. Configure
+Domain routing requires `dnsmasq-full` with `nftset`. The installer offers to replace stock `dnsmasq` if that support is missing; replacement restarts DNS. Configure servers and groups before starting the service after a fresh install.
+
+## Configure in LuCI
 
 1. Open **Services → TrustTunnel → Settings**.
-2. On the **Server** tab, click **Import…** and paste your server's config,
-   or enter the connection settings manually.
-3. On the **Lists** tab, select the services or categories you need.
-   Add custom domains and exclusions on the **My domains** tab if needed.
-4. Enable startup on boot, click **Save & Apply**, then **Start** on the status page.
+2. In **Servers**, add a server, give it a name and click **Import…** in its form. Paste a configuration or `tt://` link, or enter connection settings manually. Add other servers as needed.
+3. In **Site groups**, load the category catalog, select a category and add it. Examples: `youtube`, `telegram`, `openai`.
+4. Choose a fixed server or automatic strategy for each group. Under **Options**, configure its pool, primary server, selection metric, control URL and additional domains.
+5. Save and apply. Enable startup on boot under **General** if needed, then start the service on **Status**.
+6. Check server health and selected group exits. Use **Diagnostics** to check a domain and external IP.
 
-### 3. Verify
+| Example group | Exit policy |
+|---|---|
+| YouTube | Automatic selection from two servers |
+| Telegram | Fixed server |
+| ChatGPT / OpenAI | Primary with fallback |
 
-On the **Diagnostics** page, check the configuration and enter a domain such as `youtube.com`.
-The app explains whether it is selected for routing through the tunnel and why.
-Use the external IP comparison to check the tunnel's exit address alongside your direct connection.
+For device-specific routing, save the groups first, then add a device under **Devices**, enter its IP, subnet or MAC, and assign groups. Enable **Device routing** under **General** and apply.
 
-## Interface
+## Routing modes
 
-**Status:** service controls, routing mode, list counts, and package and client versions.
+| Mode | Traffic through the VPN |
+|---|---|
+| Selective | Selected group domains and subnets, respecting exclusions and device rules |
+| Full | LAN internet traffic, respecting configured exclusions |
 
-![TrustTunnel status in LuCI: running service, domain and subnet counts, package and client versions](Screenshot_1.png)
+Router-originated traffic is a separate option. When enabled, the killswitch blocks selected traffic if the tunnel is unavailable.
 
-**Diagnostics:** configuration checks, domain checks, endpoint ping and external IP comparison.
+Domain matching relies on router DNS. Device-side DoH/DoT can bypass it, and sites sharing an IP can match the same rule. Geosite `regexp` and `keyword` rules are unsupported; the UI reports skipped rule counts. `full` rules use dnsmasq domain matching, which also includes subdomains.
 
-![TrustTunnel diagnostics in LuCI: check results, domain check, ping and external IP comparison](Screenshot_2.png)
+Each enabled server starts a separate client and consumes memory. Add guest networks explicitly to the LAN interface list.
 
-## Two modes
+## Updates and documentation
 
-| Mode | Traffic through the tunnel | Use case |
-|---|---|---|
-| **Bypass by list** — default | Selected domain and subnet lists plus your custom domains | Use a VPN for specific services while other traffic stays direct |
-| **Everything through VPN** | LAN internet traffic, with exclusions | Tunnel internet traffic for the whole home network |
+Run the installer again to update the published package and client. It preserves settings and restores a previously running service.
 
-Routing the router's own traffic is a separate option.
-See [routing modes](GUIDE.en.md#two-modes) and [killswitch](GUIDE.en.md#killswitch) for details.
+- [Detailed guide](GUIDE.en.md): DNS, routing, diagnostics, updates and removal.
+- [Installation on another router](INSTALL-OTHER-ROUTER.ru.md) (Russian).
+- [UCI settings reference](SETTINGS.ru.md) (Russian).
 
-## Things to know
+The guides also describe the previous single-server interface. Follow the steps above for the current settings tabs.
 
-- Selective routing matches domains through the router's DNS.
-  Devices using their own DoH/DoT may bypass that matching.
-- A service may use multiple domains; use the community lists and domain checker.
-- Sites sharing an IP address may cause additional domains to be routed through the tunnel.
-- Every enabled server consumes additional memory. On 256 MB routers, keep no more than two or three servers enabled at once.
-- Add guest network interfaces to the LAN interface settings explicitly.
+## Tests and package builds
 
-See the complete [limitations and workarounds](GUIDE.en.md#limitations).
+Run shell tests on Linux:
 
-## Documentation
+```sh
+sh tests/run.sh
+```
 
-- [Detailed guide](GUIDE.en.md): installation, interface, configuration without LuCI, updates and removal.
-- [Settings reference](SETTINGS.ru.md) (Russian): options and examples; an English summary is available [in the guide](GUIDE.en.md#full-settings-reference).
-- [DNS and routing internals](GUIDE.en.md#how-it-works-internally).
-- [Diagnostics and troubleshooting](GUIDE.en.md#diagnostics).
-- [Architecture compatibility](GUIDE.en.md#which-routers-are-supported).
+GitHub Actions checks tests, executable permissions, ShellCheck **0.11.0**, shell/JavaScript/JSON/ucode syntax and LuCI/ucode module imports. CI uses Ubuntu 24.04.
 
-To update, run the installation command again. It updates the package and client while preserving settings.
+The **Release** workflow builds APKs using the OpenWrt SDK for `x86-64-25.12.5`. The LuCI package has architecture `all`; the VPN client binary is installed separately for the router CPU. The main package and Russian translation are uploaded as artifacts; pushing a `v*` tag also publishes them to GitHub Releases.
 
-## Support the project
+## License
 
-**If this package helped you, give it a ⭐ [on GitHub](https://github.com/nekl3103/trusttunnel).**
-It helps other users discover the project.
-
-Found a bug or tested the package on your router? [Open an issue](https://github.com/nekl3103/trusttunnel/issues)
-with your router model, OpenWrt version, package version and test results.
-Remove passwords and other connection details before posting logs.
-
-[Donate to support development](GUIDE.en.md#donate).
-
-## License and acknowledgements
-
-[GPL-2.0](LICENSE). The package uses the [TrustTunnel client](https://github.com/TrustTunnel/TrustTunnelClient)
-and [itdoginfo/allow-domains](https://github.com/itdoginfo/allow-domains) lists.
-The selective routing approach was checked against [itdoginfo/podkop](https://github.com/itdoginfo/podkop).
-This is a community integration, not an official AdGuard product.
+[GPL-2.0](LICENSE). Uses [TrustTunnelClient](https://github.com/TrustTunnel/TrustTunnelClient), [v2fly/domain-list-community](https://github.com/v2fly/domain-list-community) and [itdoginfo/allow-domains](https://github.com/itdoginfo/allow-domains). This is a community integration separate from the official AdGuard product.

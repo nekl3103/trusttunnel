@@ -4,6 +4,7 @@ set -e
 URL=${TT_GEOSITE_PLAIN_URL:-https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml}
 STATE=${TT_STATE_DIR:-/usr/share/trusttunnel}
 CACHE=$STATE/geosite.dat_plain.yml
+CATALOG=$STATE/geosite.catalog.tsv
 LISTSDIR=${TT_LISTS_DIR:-/usr/share/trusttunnel/lists}
 
 download() {
@@ -11,9 +12,12 @@ download() {
 	tmp="$CACHE.new"
 	rm -f "$tmp"
 	curl -fL --connect-timeout 10 --max-time 90 "$URL" -o "$tmp"
-	[ -s "$tmp" ] && grep -q '^  - name: "' "$tmp" || { rm -f "$tmp"; echo 'invalid geosite catalog' >&2; return 1; }
+	if [ ! -s "$tmp" ] || ! grep -q '^  - name: "' "$tmp"; then
+		rm -f "$tmp"; echo 'invalid geosite catalog' >&2; return 1
+	fi
 	[ -s "$CACHE" ] && cp "$CACHE" "$CACHE.previous"
 	mv "$tmp" "$CACHE"
+	rm -f "$CATALOG"
 	date +%s > "$STATE/geosite.updated"
 }
 
@@ -22,7 +26,16 @@ ensure_cache() {
 }
 
 catalog() {
-	[ "${1:-}" = refresh ] && download || ensure_cache
+	if [ "${1:-}" = refresh ]; then
+		download || ensure_cache
+	else
+		ensure_cache
+	fi
+	if [ -s "$CATALOG" ] && [ ! "$CACHE" -nt "$CATALOG" ]; then
+		cat "$CATALOG"
+		return
+	fi
+	tmp_catalog="$CATALOG.$$"
 	awk '
 		function emit() { if (name != "") print name "\t" total "\t" applied "\t" ignored }
 		/^  - name: "/ {
@@ -37,7 +50,9 @@ catalog() {
 			if (r ~ /^(domain|full|ip|cidr):/) applied++; else ignored++
 		}
 		END { emit() }
-	' "$CACHE"
+	' "$CACHE" > "$tmp_catalog"
+	mv "$tmp_catalog" "$CATALOG"
+	cat "$CATALOG"
 }
 
 extract_one() {
@@ -46,6 +61,9 @@ extract_one() {
 	cidr=$LISTSDIR/Geosite/$name.cidr
 	meta=$LISTSDIR/Geosite/$name.meta
 	mkdir -p "$LISTSDIR/Geosite"
+	if [ -f "$dest" ] && [ -f "$cidr" ] && [ -s "$meta" ] && [ "$meta" -nt "$CACHE" ]; then
+		return
+	fi
 	awk -v wanted="$name" -v domains="$dest.new" -v networks="$cidr.new" -v metadata="$meta.new" '
 		function unquote(s) { sub(/^      - "/, "", s); sub(/"$/, "", s); return s }
 		/^  - name: "/ {

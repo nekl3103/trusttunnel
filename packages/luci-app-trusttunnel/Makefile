@@ -66,6 +66,7 @@ define Build/Compile
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/multi-gen-config
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/multi-client
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/multi-manager
+	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/service-action
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/multi-watch
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/secret-store
 	chmod 0755 $(PKG_BUILD_DIR)/root/usr/libexec/trusttunnel/normalize

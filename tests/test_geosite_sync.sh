@@ -28,5 +28,12 @@ assert_contains "$(cat "$TT_TEST_TMP/lists/Geosite/video.cidr")" '203.0.113.0/24
 assert_contains "$(cat "$TT_TEST_TMP/lists/Geosite/video.meta")" 'ignored=1' 'geosite reports unsupported regex rules'
 catalog=$(TT_STATE_DIR="$TT_TEST_TMP/state" sh "$root/packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/geosite-sync" catalog)
 assert_contains "$catalog" "$(printf 'video\t4\t3\t1')" 'catalog reports source and usable rule counts'
+assert_exit 0 'parsed catalog is cached for subsequent page loads' test -s "$TT_TEST_TMP/state/geosite.catalog.tsv"
+printf 'video\t9\t8\t1\n' > "$TT_TEST_TMP/state/geosite.catalog.tsv"
+catalog=$(TT_STATE_DIR="$TT_TEST_TMP/state" sh "$root/packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/geosite-sync" catalog)
+assert_contains "$catalog" "$(printf 'video\t9\t8\t1')" 'unchanged source uses the parsed catalog cache'
+touch -t 200001010000 "$TT_TEST_TMP/state/geosite.catalog.tsv"
+catalog=$(TT_STATE_DIR="$TT_TEST_TMP/state" sh "$root/packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/geosite-sync" catalog)
+assert_contains "$catalog" "$(printf 'video\t4\t3\t1')" 'newer source rebuilds the parsed catalog cache'
 
 tt_test_summary

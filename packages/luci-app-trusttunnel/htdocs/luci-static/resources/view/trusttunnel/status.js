@@ -2,13 +2,12 @@
 'require view';
 'require poll';
 'require rpc';
+'require trusttunnel.service as service';
 'require ui';
 'require dom';
 
 var callStatus = rpc.declare({ object: 'luci.trusttunnel', method: 'status' });
-var callService = rpc.declare({
-	object: 'luci.trusttunnel', method: 'service', params: [ 'action' ]
-});
+
 var callVersions = rpc.declare({
 	object: 'luci.trusttunnel', method: 'versions', params: [ 'refresh' ]
 });
@@ -46,6 +45,10 @@ function verdict(st) {
 		return { level: 'danger',
 			head: _('This dnsmasq cannot fill the bypass set'),
 			detail: _('Install dnsmasq-full, or switch to "everything through VPN" mode. Nothing is bypassed until then.') };
+
+	if (st.operation_pending)
+		return { level: 'warning', head: _('Применяются настройки службы'),
+			detail: _('Дождитесь завершения операции.') };
 
 	if (!st.running)
 		return st.enabled
@@ -109,6 +112,7 @@ function fmtAge(ts) {
 function reasonText(reason) {
 	return ({ fastest: _('самый быстрый'), stable: _('без переключения'), manual: _('задан вручную'),
 		override: _('временный выбор'), primary: _('основной сервер'), balanced: _('распределение нагрузки'),
+		checking: _('проверяем повторно'),
 		unavailable: _('нет доступного сервера') })[reason] || reason || '—';
 }
 
@@ -138,7 +142,7 @@ return view.extend({
 	handleAction: function(action, ev) {
 		var self = this;
 		ui.showModal(_('Please wait'), [ E('p', { 'class': 'spinning' }, _('Running…')) ]);
-		return callService(action).then(function(res) {
+		return service.run(action).then(function(res) {
 			ui.hideModal();
 			// not_running: собственный код возврата init-скрипта для `start`
 			// недостоверен (см. действие service в luci.trusttunnel) — бэкенд
@@ -254,6 +258,7 @@ return view.extend({
 
 	renderServers: function(st) {
 		var self = this;
+		this.pendingOverrides = this.pendingOverrides || {};
 		var names = {};
 		(st.servers || []).forEach(function(s) { names[s.id] = s.name; });
 		var rows = [ E('tr', { 'class': 'tr table-titles' }, [
@@ -269,7 +274,7 @@ return view.extend({
 			rows.push(E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td left' }, s.name),
 				E('td', { 'class': 'td left' }, s.state === 'up'
-					? E('span', { 'style': 'color:#2e7d32;font-weight:bold' }, _('available'))
+					? E('span', { 'style': 'color:' + (s.failures ? '#b77900' : '#2e7d32') + ';font-weight:bold' }, s.failures ? _('Проверяем повторно (%d/3)').format(s.failures) : _('available'))
 					: E('span', { 'style': 'color:#c62828;font-weight:bold' }, _('unavailable'))),
 				E('td', { 'class': 'td left' }, s.state === 'up' ? s.latency + ' ms' : '—'),
 				E('td', { 'class': 'td left' }, fmtSpeed(s.speed)),
@@ -279,15 +284,18 @@ return view.extend({
 			]));
 		});
 		var groups = (st.groups || []).map(function(g) {
-			var select = E('select', { 'class': 'cbi-input-select' }, [ E('option', { 'value': 'auto' }, _('Automatic')) ]);
+			var select = E('select', { 'class': 'cbi-input-select' }, [ E('option', { 'value': 'auto' }, _('По сохранённым настройкам')) ]);
 			(st.servers || []).forEach(function(s) { select.appendChild(E('option', { 'value': s.id }, s.name)); });
-			select.value = g.override ? g.override.server : 'auto';
+			select.value = self.pendingOverrides[g.id] || (g.override ? g.override.server : 'auto');
+			select.addEventListener('change', function() { self.pendingOverrides[g.id] = select.value; });
 			var apply = E('button', { 'class': 'cbi-button cbi-button-action', 'type': 'button' }, _('Apply for 30 min'));
 			apply.addEventListener('click', function() {
 				apply.disabled = true;
 				callOverride(g.id, select.value, 1800).then(function(res) {
 					if (res.error) throw new Error(res.error);
+					delete self.pendingOverrides[g.id];
 					ui.addNotification(null, E('p', {}, _('Routing override applied')), 'info');
+					return self.refreshStatus();
 				}).catch(function(e) { ui.addNotification(null, E('p', {}, e.message || String(e)), 'danger'); })
 				.finally(function() { apply.disabled = false; });
 			});
@@ -295,8 +303,10 @@ return view.extend({
 				E('td', { 'class': 'td left' }, g.name),
 				E('td', { 'class': 'td left' }, g.server ? (names[g.server] || g.server) : _('no healthy server')),
 				E('td', { 'class': 'td left' }, [ reasonText(g.reason || g.strategy),
+					E('small', { 'style': 'display:block;opacity:.7' }, _('Сохранено: ') + (g.strategy === 'manual' ? (names[g.configured_server] || g.configured_server || '—') : (g.strategy === 'auto' ? _('Автоматически') : reasonText(g.strategy)))),
+					g.override ? E('small', { 'style': 'display:block;opacity:.7' }, _('Временный выбор: ') + (names[g.override.server] || g.override.server) + (g.override.until ? _(' · осталось %d мин').format(Math.max(0, Math.ceil((g.override.until - Date.now() / 1000) / 60))) : '')) : '',
 					g.check ? E('small', { 'style': 'display:block;opacity:.7' },
-						g.check.state === 'ok' ? _('сайт доступен') : _('контрольный сайт недоступен')) : '' ]),
+						g.check.state === 'ok' ? _('сайт доступен') : (g.check.state === 'restricted' ? _('сайт отвечает HTTP %d; доступ ограничен').format(g.check.http_code || 403) : _('контрольный сайт недоступен'))) : '' ]),
 				E('td', { 'class': 'td left' }, fmtAge(g.changed)),
 				E('td', { 'class': 'td left' }, [ select, ' ', apply ])
 			]);
@@ -416,6 +426,9 @@ return view.extend({
 		var logBox = E('pre', {
 			'style': 'max-height:22em;overflow:auto;margin:0'
 		}, '');
+		var logSummary = E('p', {}, _('Загрузка журнала…'));
+		var historyLog = E('pre', { 'style': 'max-height:18em;overflow:auto' }, '');
+		var historyDetails = E('details', { 'style': 'display:none' }, [ E('summary', {}, _('Предыдущие записи журнала')), historyLog ]);
 
 		// Версии запрашиваются ОДИН раз при отрисовке, а не через poll:
 		// сетевая часть кэшируется на сутки, и повторять даже кэшированный
@@ -443,11 +456,17 @@ return view.extend({
 		};
 		poll.add(this.refreshStatus, 10);
 
-		poll.add(function() {
+		var refreshLog = function() {
 			return callLog(80).then(function(r) {
-				logBox.textContent = (r.lines || []).join('\n');
+				var current = (r.lines || []).join('\n'), history = (r.history || []).join('\n');
+				if (logBox.textContent !== current) logBox.textContent = current;
+				if (historyLog.textContent !== history) historyLog.textContent = history;
+				historyDetails.style.display = history ? '' : 'none';
+				logSummary.textContent = r.last_error ? _('Последняя ошибка в показанных записях: ') + r.last_error : _('В последних записях текущего сеанса ошибок нет.');
 			});
-		}, 10);
+		};
+		refreshLog();
+		poll.add(refreshLog, 30);
 
 		// Два блока рядом через flex-wrap, а НЕ через сетку с media-запросами:
 		// оба узкие и самостоятельные, а flex-basis заставляет их встать в
@@ -484,7 +503,7 @@ return view.extend({
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Client log')),
-				logBox
+				logSummary, logBox, historyDetails
 			])
 		]);
 	}

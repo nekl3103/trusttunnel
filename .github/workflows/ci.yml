@@ -11,7 +11,7 @@ on:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -31,6 +31,10 @@ jobs:
           packages/luci-app-trusttunnel/root/etc/uci-defaults/40-luci-trusttunnel
           packages/luci-app-trusttunnel/root/etc/hotplug.d/net/40-trusttunnel
           packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/canon-subnets
+          packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/geosite-sync
+          packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/secret-store
+          packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/service-action
+          packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/speedtest
           packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/fetch-lists
           packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/gen-config
           packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/gen-lists
@@ -79,6 +83,10 @@ jobs:
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-gen-config \
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-manager \
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/multi-watch \
+            packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/geosite-sync \
+            packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/secret-store \
+            packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/service-action \
+            packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/speedtest \
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/fetch-lists \
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/routing \
             packages/luci-app-trusttunnel/root/usr/libexec/trusttunnel/uci-export \
@@ -153,6 +161,7 @@ jobs:
           uc=/tmp/ucode/build/ucode
           "$uc" -L '/tmp/ucode/build/*.so' -c \
             packages/luci-app-trusttunnel/root/usr/share/rpcd/ucode/luci.trusttunnel
+          UCODE="$uc" sh tests/test_deeplink.sh
 
           # Контроль самой проверки: компилятор, принимающий заведомо битый
           # файл, не проверяет ничего, а зелёный шаг при этом обманывает.
@@ -183,7 +192,7 @@ jobs:
           # кавычках вызовов не содержат, поэтому этого признака достаточно.
           mods="ui dom rpc uci form view poll fs network validation"
           fail=0
-          for f in packages/luci-app-trusttunnel/htdocs/luci-static/resources/view/trusttunnel/*.js; do
+          for f in packages/luci-app-trusttunnel/htdocs/luci-static/resources/view/trusttunnel/*.js packages/luci-app-trusttunnel/htdocs/luci-static/resources/trusttunnel/*.js; do
             for m in $mods; do
               grep -qE "(^|[^A-Za-z0-9_.$])${m}\.[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(" "$f" || continue
               grep -qE "^'require ${m}'" "$f" && continue
@@ -217,4 +226,4 @@ jobs:
               }
             }
             if (failed) process.exit(1);
-          ' packages/luci-app-trusttunnel/htdocs/luci-static/resources/view/trusttunnel/*.js
+          ' packages/luci-app-trusttunnel/htdocs/luci-static/resources/view/trusttunnel/*.js packages/luci-app-trusttunnel/htdocs/luci-static/resources/trusttunnel/*.js

@@ -3,6 +3,7 @@
 'require form';
 'require uci';
 'require rpc';
+'require trusttunnel.service as service';
 'require ui';
 'require validation';
 
@@ -13,11 +14,9 @@ var callCatalog = rpc.declare({
 	object: 'luci.trusttunnel', method: 'catalog', params: [ 'refresh' ]
 });
 var callGeositeCatalog = rpc.declare({
-	object: 'luci.trusttunnel', method: 'geosite_catalog', params: [ 'refresh' ]
+	object: 'luci.trusttunnel', method: 'geosite_catalog', params: [ 'refresh', 'names' ]
 });
-var callService = rpc.declare({
-	object: 'luci.trusttunnel', method: 'service', params: [ 'action' ]
-});
+
 var callSecretSet = rpc.declare({
 	object: 'luci.trusttunnel', method: 'secret_set', params: [ 'server', 'password' ]
 });
@@ -109,9 +108,25 @@ function collapseSubnets(groups) {
 // к роутеру.
 return view.extend({
 	load: function() {
+		var self = this;
+		var config = uci.load('trusttunnel').then(function() {
+			self.serverIds = uci.sections('trusttunnel', 'server').map(function(s) { return s['.name']; });
+		});
 		return Promise.all([
-			uci.load('trusttunnel'),
-			callGeositeCatalog(false).catch(function(e) { return { error: e.message }; }),
+			config,
+			config.then(function() {
+				var names = [];
+				uci.sections('trusttunnel', 'group', function(g) {
+					L.toArray(g.source).forEach(function(path) {
+						var match = path.match(/^Geosite\/(.+)\.lst$/);
+						if (match) names.push(match[1]);
+					});
+					var aliases = { youtube: 'youtube', telegram: 'telegram', openai: 'openai', chatgpt: 'openai', 'chatgpt / openai': 'openai' };
+					var alias = aliases[(g.name || '').toLowerCase()];
+					if (alias && names.indexOf(alias) < 0) names.push(alias);
+				});
+				return callGeositeCatalog(false, names.join(',') || '-');
+			}).catch(function(e) { return { error: e.message }; }),
 			callHostHints().catch(function() { return {}; })
 		]);
 	},
@@ -202,7 +217,7 @@ return view.extend({
 		ui.showModal(_('Please wait'), [
 			E('p', { 'class': 'spinning' }, _('Downloading the lists and regenerating the rules…'))
 		]);
-		return callService('update_lists').then(function(res) {
+		return service.run('update_lists').then(function(res) {
 			ui.hideModal();
 			ui.addNotification(null, E('pre', {}, res.output || _('Done')),
 				res.code === 0 ? 'info' : 'warning');
@@ -239,82 +254,120 @@ return view.extend({
 	},
 
 	renderGeositeCatalog: function(catalog) {
-		if (catalog.error)
-			return E('div', { 'class': 'alert-message warning' }, catalog.error);
-
 		var self = this;
 		var existing = {};
 		uci.sections('trusttunnel', 'group', function(g) {
 			var geosite = false;
 			L.toArray(g.source).forEach(function(path) {
-				var m = path.match(/^Geosite\/(.+)\.lst$/);
-				if (m) { existing[m[1]] = g; geosite = true; }
+				var match = path.match(/^Geosite\/(.+)\.lst$/);
+				if (match) { existing[match[1]] = g; geosite = true; }
 			});
 			if (!geosite) {
-				var alias = {
-					'youtube': 'youtube', 'telegram': 'telegram', 'openai': 'openai',
-					'chatgpt': 'openai', 'chatgpt / openai': 'openai'
-				};
-				var key = alias[(g.name || '').toLowerCase()];
+				var aliases = { youtube: 'youtube', telegram: 'telegram', openai: 'openai',
+					chatgpt: 'openai', 'chatgpt / openai': 'openai' };
+				var key = aliases[(g.name || '').toLowerCase()];
 				if (key && !existing[key]) existing[key] = g;
 			}
 		});
-		var servers = uci.sections('trusttunnel', 'server').filter(function(s) {
-			return s.enabled !== '0';
+		var servers = uci.sections('trusttunnel', 'server').filter(function(s) { return s.enabled !== '0'; });
+		var titles = { openai: 'ChatGPT / OpenAI', youtube: 'YouTube', instagram: 'Instagram',
+			telegram: 'Telegram', twitter: 'X / Twitter', github: 'GitHub' };
+		function titleFor(name) { return titles[name] || name.replace(/-/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); }); }
+		var items = (catalog.items || []).slice();
+		Object.keys(existing).forEach(function(name) {
+			if (!items.some(function(item) { return item.name === name; })) items.push({ name: name });
 		});
-		var common = [ 'openai', 'youtube', 'instagram', 'telegram', 'apple', 'google',
-			'facebook', 'twitter', 'discord', 'spotify', 'netflix', 'github', 'microsoft',
-			'tiktok', 'steam', 'whatsapp', 'cloudflare', 'category-ai-chat-!cn',
-			'category-games', 'category-media' ];
-		var rank = {};
-		common.forEach(function(n, i) { rank[n] = i; });
-		var items = (catalog.items || []).slice().sort(function(a, b) {
-			var ar = rank[a.name], br = rank[b.name];
-			if (ar != null || br != null)
-				return (ar == null ? 9999 : ar) - (br == null ? 9999 : br);
-			return a.name.localeCompare(b.name);
-		});
+		items.sort(function(a, b) { return titleFor(a.name).localeCompare(titleFor(b.name)); });
 		this.geositeControls = [];
 
-		var picker = E('select', { 'class': 'cbi-input-select', 'style': 'min-width:18em' }, [
-			E('option', { 'value': '' }, _('Выберите группу…'))
+		var count = E('span', { 'class': 'tt-groups-count', 'aria-live': 'polite' });
+		var search = E('input', { 'type': 'search', 'class': 'cbi-input-text',
+			'placeholder': _('Поиск: YouTube, Telegram, OpenAI…'), 'aria-label': _('Поиск группы сайтов') });
+		var picker = E('select', { 'class': 'cbi-input-select', 'aria-label': _('Группа сайтов') });
+		var add = E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-add', 'disabled': '' }, _('Добавить группу'));
+		var loadCatalog = E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-neutral' }, _('Загрузить полный каталог'));
+		var empty = E('div', { 'class': 'tt-groups-empty' }, [
+			E('strong', {}, _('Группы ещё не добавлены')),
+			E('p', {}, _('Выберите сервис выше и нажмите «Добавить группу». Затем выберите сервер, через который будут открываться его сайты.'))
 		]);
-		items.forEach(function(item) {
-			if (!existing[item.name]) picker.appendChild(E('option', { 'value': item.name }, item.name));
+		var grid = E('div', { 'class': 'tt-groups-grid' });
+		function updatePicker() {
+			var selected = picker.value;
+			var query = search.value.trim().toLowerCase();
+			while (picker.firstChild) picker.removeChild(picker.firstChild);
+			picker.appendChild(E('option', { 'value': '' }, _('Выберите группу…')));
+			items.forEach(function(item) {
+				if (existing[item.name] || (titleFor(item.name) + ' ' + item.name).toLowerCase().indexOf(query) < 0) return;
+				picker.appendChild(E('option', { 'value': item.name }, titleFor(item.name) + ' · ' + item.name));
+			});
+			picker.value = selected;
+			if (picker.selectedIndex < 0) picker.value = '';
+			add.disabled = !picker.value;
+		}
+		function updateCount() {
+			var active = self.geositeControls.filter(function(c) { return !c.removed; }).length;
+			count.textContent = _('Групп: %d').format(active);
+			empty.style.display = active ? 'none' : '';
+		}
+		search.addEventListener('input', updatePicker);
+		picker.addEventListener('change', function() { add.disabled = !picker.value; });
+		loadCatalog.addEventListener('click', function() {
+			loadCatalog.disabled = true;
+			loadCatalog.textContent = _('Загрузка каталога…');
+			callGeositeCatalog(false, '').then(function(full) {
+				if (full.error) throw new Error(full.error);
+				(full.items || []).forEach(function(item) {
+					var index = items.findIndex(function(old) { return old.name === item.name; });
+					if (index < 0) items.push(item); else items[index] = item;
+				});
+				items.sort(function(a, b) { return titleFor(a.name).localeCompare(titleFor(b.name)); });
+				updatePicker();
+				loadCatalog.style.display = 'none';
+			}).catch(function(e) {
+				loadCatalog.disabled = false;
+				loadCatalog.textContent = _('Повторить загрузку каталога');
+				ui.addNotification(null, E('p', {}, e.message), 'danger');
+			});
 		});
-		var add = E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-add' }, _('Добавить группу'));
-		var grid = E('div', {
-			'style': 'display:grid;grid-template-columns:1fr;gap:12px;margin-top:12px'
-		});
+		function field(title, input, hint) {
+			return E('label', { 'class': 'tt-group-field' }, [ E('span', {}, title), input,
+				hint ? E('small', {}, hint) : '' ]);
+		}
 		function renderItem(item) {
 			var group = existing[item.name];
+			if (group === true) group = null;
+			var title = titleFor(item.name);
 			var cb = E('input', { 'type': 'checkbox' });
-			cb.checked = true;
-			var route = E('select', {
-				'class': 'cbi-input-select', 'style': 'max-width:10em'
-			}, [
-				E('option', { 'value': 'auto' }, _('Fastest')),
-				E('option', { 'value': 'priority' }, _('Primary + fallback')),
-				E('option', { 'value': 'balanced' }, _('Распределять нагрузку'))
+			cb.checked = !group || group.enabled !== '0';
+			var route = E('select', { 'class': 'cbi-input-select' }, [
+				E('option', { 'value': 'auto' }, _('Автоматический выбор')),
+				E('option', { 'value': 'priority' }, _('Основной и резервные')),
+				E('option', { 'value': 'balanced' }, _('Распределение между серверами'))
 			]);
-			servers.forEach(function(s) {
-				route.appendChild(E('option', { 'value': 'fixed:' + s['.name'] }, s.name || s['.name']));
-			});
-			if (group && group.strategy === 'manual' && group.server) route.value = 'fixed:' + group.server;
-			else if (group && (group.strategy === 'priority' || group.strategy === 'balanced')) route.value = group.strategy;
-			var pool = E('select', { 'multiple': '', 'class': 'cbi-input-select', 'style': 'width:100%;min-height:5em' });
-			var savedPool = group ? L.toArray(group.pool) : servers.map(function(s) { return s['.name']; });
-			var primary = E('select', { 'class': 'cbi-input-select', 'style': 'width:100%' }, [ E('option', { 'value': '' }, _('None')) ]);
+			servers.forEach(function(s) { route.appendChild(E('option', { 'value': 'fixed:' + s['.name'] }, s.name || s['.name'])); });
+			if (group && group.strategy === 'manual' && group.server) {
+				if (!servers.some(function(s) { return s['.name'] === group.server; })) {
+					var saved = uci.get('trusttunnel', group.server, 'name') || group.server;
+					route.appendChild(E('option', { 'value': 'fixed:' + group.server }, saved + ' (' + _('недоступен') + ')'));
+				}
+				route.value = 'fixed:' + group.server;
+			} else if (group && (group.strategy === 'priority' || group.strategy === 'balanced')) route.value = group.strategy;
+			var savedPool = group ? L.toArray(group.pool) : [];
+			var pool = E('div', { 'class': 'tt-group-pool' });
+			var primary = E('select', { 'class': 'cbi-input-select' }, [ E('option', { 'value': '' }, _('Выберите основной сервер')) ]);
 			servers.forEach(function(s) {
 				var id = s['.name'];
-				pool.appendChild(E('option', { 'value': id, 'selected': savedPool.indexOf(id) >= 0 ? '' : null }, s.name || id));
+				var check = E('input', { 'type': 'checkbox', 'value': id });
+				check.checked = !savedPool.length || savedPool.indexOf(id) >= 0;
+				pool.appendChild(E('label', {}, [ check, E('span', {}, s.name || id) ]));
 				primary.appendChild(E('option', { 'value': id }, s.name || id));
 			});
+			if (!servers.length) pool.appendChild(E('small', {}, _('Сначала добавьте и включите сервер на вкладке «Серверы».')));
 			if (group && group.primary) primary.value = group.primary;
-			var domains = E('textarea', { 'rows': 3, 'style': 'width:100%', 'placeholder': 'example.com' }, group ? L.toArray(group.domain).join('\n') : '');
-			var threshold = E('input', { 'type': 'number', 'min': 0, 'class': 'cbi-input-text', 'value': group && group.switch_threshold || '', 'placeholder': _('global') });
-			var cooldown = E('input', { 'type': 'number', 'min': 0, 'class': 'cbi-input-text', 'value': group && group.switch_cooldown || '', 'placeholder': _('global') });
-			var metric = E('select', { 'class': 'cbi-input-select', 'style': 'width:100%' }, [
+			var domains = E('textarea', { 'rows': 3, 'class': 'cbi-input-text', 'placeholder': 'example.com\nvideo.example.com' }, group ? L.toArray(group.domain).join('\n') : '');
+			var threshold = E('input', { 'type': 'number', 'min': 0, 'class': 'cbi-input-text', 'value': group && group.switch_threshold || '', 'placeholder': _('Общая настройка') });
+			var cooldown = E('input', { 'type': 'number', 'min': 0, 'class': 'cbi-input-text', 'value': group && group.switch_cooldown || '', 'placeholder': _('Общая настройка') });
+			var metric = E('select', { 'class': 'cbi-input-select' }, [
 				E('option', { 'value': 'latency' }, _('Минимальная задержка')),
 				E('option', { 'value': 'speed' }, _('Максимальная скорость')),
 				E('option', { 'value': 'reliability' }, _('Максимальная надёжность'))
@@ -322,54 +375,94 @@ return view.extend({
 			metric.value = group && group.metric || 'latency';
 			var defaultChecks = { youtube: 'https://www.youtube.com/generate_204', telegram: 'https://telegram.org/favicon.ico',
 				openai: 'https://chatgpt.com/favicon.ico', instagram: 'https://www.instagram.com/favicon.ico' };
-			var controlUrl = E('input', { 'type': 'url', 'class': 'cbi-input-text', 'style': 'width:100%',
-				'value': group && group.control_url || defaultChecks[item.name] || '', 'placeholder': 'https://example.com/favicon.ico' });
-			var advanced = E('div', { 'style': 'display:none;grid-column:1/-1;padding-top:10px' }, [
-				E('div', { 'style': 'display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px' }, [
-					E('label', {}, [ _('Eligible servers'), pool ]),
-					E('label', {}, [ _('Primary server'), primary ]),
-					E('label', {}, [ _('Switch advantage, ms'), threshold ]),
-					E('label', {}, [ _('Switch cooldown, seconds'), cooldown ]),
-					E('label', {}, [ _('Критерий выбора'), metric ]),
-					E('label', {}, [ _('Контрольный URL'), controlUrl ])
-				]),
-				E('label', { 'style': 'display:block;margin-top:8px' }, [ _('Additional domains (one per line)'), domains ])
+			var controlUrl = E('input', { 'type': 'url', 'class': 'cbi-input-text',
+				'value': group ? group.control_url || '' : defaultChecks[item.name] || '', 'placeholder': 'https://example.com/favicon.ico' });
+			var poolField = E('div', { 'class': 'tt-group-field' }, [ E('span', {}, _('Серверы для этой группы')), pool,
+				E('small', {}, _('Если не выбран ни один, используются все включённые серверы.')) ]);
+			var primaryField = field(_('Основной сервер'), primary, _('При его недоступности используется другой сервер из выбранных.'));
+			primaryField.className += ' tt-group-primary';
+			var metricField = field(_('Критерий выбора'), metric);
+			var thresholdField = field(_('Порог переключения, мс'), threshold);
+			var cooldownField = field(_('Пауза между переключениями, секунд'), cooldown);
+			var advanced = E('details', { 'class': 'tt-group-options' }, [
+				E('summary', {}, _('Дополнительные настройки')),
+				E('div', { 'class': 'tt-group-fields' }, [ poolField, metricField, thresholdField, cooldownField,
+					field(_('Адрес проверки доступности'), controlUrl, _('Необязательно. Проверяет, открывается ли сервис через сервер.')),
+					field(_('Дополнительные домены'), domains, _('По одному домену в строке. Домены категории подключаются автоматически.')) ])
 			]);
-			var more = E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-neutral' }, _('Options'));
-			more.addEventListener('click', function(ev) { ev.preventDefault(); advanced.style.display = advanced.style.display === 'none' ? 'block' : 'none'; });
-			var titles = {
-				openai: 'ChatGPT / OpenAI', youtube: 'YouTube', instagram: 'Instagram',
-				telegram: 'Telegram'
-			};
-			var title = titles[item.name] || item.name.replace(/-/g, ' ').replace(/\b\w/g, function(c) { return c.toUpperCase(); });
-			var card = E('div', {
-				'style': 'display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;gap:12px;padding:14px 16px;border:1px solid rgba(127,127,127,.2);border-radius:12px;background:rgba(127,127,127,.06)'
-			}, [
-				cb,
-				E('span', { 'style': 'flex:1;min-width:0' }, [
-					E('strong', { 'style': 'display:block;font-size:110%' }, title),
-					E('small', { 'style': 'opacity:.65' }, _('%d usable of %d rules').format(item.applied || item.count || 0, item.count || 0) +
-						(item.ignored ? ' · ' + _('%d unsupported').format(item.ignored) : ''))
+			var routeHint = E('small', { 'class': 'tt-group-route-hint' });
+			function updateRoute() {
+				var automatic = route.value.indexOf('fixed:') !== 0;
+				poolField.style.display = automatic ? '' : 'none';
+				primaryField.style.display = route.value === 'priority' ? '' : 'none';
+				metricField.style.display = automatic && route.value !== 'balanced' ? '' : 'none';
+				thresholdField.style.display = cooldownField.style.display = automatic && route.value !== 'balanced' ? '' : 'none';
+				var hints = {
+					auto: _('Сервер выбирается из отмеченных по задержке, скорости или надёжности.'),
+					priority: _('Группа использует основной сервер, а при его недоступности — резервный.'),
+					balanced: _('Группы распределяются между доступными серверами. Одно соединение идёт через один сервер.')
+				};
+				routeHint.textContent = hints[route.value] || _('Все сайты этой группы идут через выбранный сервер.');
+			}
+			route.addEventListener('change', updateRoute);
+			updateRoute();
+			var status = E('span', { 'class': 'tt-group-status' });
+			function updateEnabled() {
+				status.textContent = cb.checked ? _('Включена') : _('Выключена');
+				status.className = 'tt-group-status' + (cb.checked ? ' tt-group-status-on' : '');
+			}
+			cb.addEventListener('change', updateEnabled);
+			updateEnabled();
+			var remove = E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-negative' }, _('Удалить'));
+			var body = E('div', { 'class': 'tt-group-body' }, [
+				E('div', { 'class': 'tt-group-heading' }, [
+					E('div', { 'class': 'tt-group-title' }, [ E('strong', {}, title),
+						E('small', {}, item.name + (item.count != null ? ' · ' + _('Правил: %d').format(item.applied == null ? item.count : item.applied) : '')) ]),
+					status, remove
 				]),
-				route, more, advanced
+				E('div', { 'class': 'tt-group-main' }, [
+					E('label', { 'class': 'tt-group-enabled' }, [ cb, E('span', {}, _('Использовать группу')) ]),
+					field(_('Через какой сервер открывать сайты'), route), routeHint, primaryField
+				]),
+				item.ignored ? E('p', { 'class': 'tt-group-note' }, _('Неподдерживаемых правил: %d. Они не участвуют в маршрутизации.').format(item.ignored)) : '',
+				advanced
 			]);
+			var restore = E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-neutral' }, _('Вернуть группу'));
+			var removed = E('div', { 'class': 'tt-group-removed', 'style': 'display:none', 'role': 'status' }, [
+				E('div', {}, [ E('strong', {}, title), E('p', {}, _('Группа будет удалена после сохранения. До этого её можно вернуть.')) ]), restore
+			]);
+			var card = E('div', { 'class': 'tt-group-card' }, [ body, removed ]);
+			var control = { name: item.name, checkbox: cb, route: route, pool: pool, primary: primary,
+				domains: domains, threshold: threshold, cooldown: cooldown, metric: metric,
+				controlUrl: controlUrl, group: group, card: card, removed: false };
+			remove.addEventListener('click', function() {
+				control.removed = true; body.style.display = 'none'; removed.style.display = '';
+				updateCount(); restore.focus();
+			});
+			restore.addEventListener('click', function() {
+				control.removed = false; body.style.display = ''; removed.style.display = 'none';
+				updateCount(); remove.focus();
+			});
 			grid.appendChild(card);
-			self.geositeControls.push({ name: item.name, checkbox: cb, route: route, pool: pool,
-				primary: primary, domains: domains, threshold: threshold, cooldown: cooldown,
-				metric: metric, controlUrl: controlUrl, group: group, card: card });
+			self.geositeControls.push(control);
 		}
 		items.forEach(function(item) { if (existing[item.name]) renderItem(item); });
 		add.addEventListener('click', function() {
-			if (!picker.value) return;
 			var item = items.filter(function(i) { return i.name === picker.value; })[0];
-			if (!item) return;
-			renderItem(item);
-			picker.remove(picker.selectedIndex);
-			picker.value = '';
+			if (!item || existing[item.name]) return;
+			renderItem(item); existing[item.name] = true;
+			search.value = ''; updatePicker(); updateCount();
 		});
-		return E('div', {}, [
-			E('p', {}, _('Показаны только выбранные группы. Новую группу можно добавить из списка.')),
-			E('div', { 'style': 'display:flex;gap:8px;flex-wrap:wrap' }, [ picker, add ]), grid
+		updatePicker(); updateCount();
+		return E('div', { 'class': 'tt-site-groups' }, [
+			E('style', {}, '.tt-site-groups{max-width:1100px}.tt-groups-header,.tt-group-heading,.tt-group-removed{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}.tt-groups-header h3{margin:0}.tt-groups-count,.tt-group-status{font-size:12px;border:1px solid rgba(127,127,127,.25);border-radius:20px;padding:4px 10px;white-space:nowrap}.tt-group-status-on{color:#20824b;background:rgba(48,160,90,.1);border-color:rgba(48,160,90,.25)}.tt-groups-intro{opacity:.75;margin:8px 0 18px}.tt-groups-add{padding:16px;border:1px solid rgba(127,127,127,.22);border-radius:10px;background:rgba(127,127,127,.04)}.tt-groups-add-row{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}.tt-groups-add-row input,.tt-groups-add-row select{flex:1;min-width:180px;max-width:100%;width:auto!important}.tt-groups-grid{display:grid;gap:14px;margin-top:18px}.tt-group-card{border:1px solid rgba(127,127,127,.25);border-radius:12px;overflow:hidden}.tt-group-heading{padding:16px 18px;background:rgba(127,127,127,.05);border-bottom:1px solid rgba(127,127,127,.18)}.tt-group-title{flex:1;min-width:160px}.tt-group-title strong{display:block;font-size:17px}.tt-group-title small{display:block;opacity:.65;margin-top:4px;overflow-wrap:anywhere}.tt-group-main{padding:16px 18px;display:grid;grid-template-columns:minmax(150px,.6fr) minmax(200px,1.4fr);gap:10px 24px;align-items:center}.tt-group-enabled,.tt-group-pool label{display:flex;align-items:center;gap:8px;cursor:pointer}.tt-group-primary{grid-column:2}.tt-group-route-hint{grid-column:2;opacity:.7;line-height:1.5}.tt-group-field{display:flex;flex-direction:column;gap:7px;min-width:0}.tt-group-field>span{font-weight:600}.tt-group-field small{opacity:.7;line-height:1.5}.tt-group-field input:not([type=checkbox]),.tt-group-field select,.tt-group-field textarea{width:100%!important;max-width:100%;box-sizing:border-box}.tt-group-pool{display:flex;flex-wrap:wrap;gap:8px 18px}.tt-group-options{border-top:1px solid rgba(127,127,127,.18);padding:0 18px}.tt-group-options summary{cursor:pointer;padding:14px 0;font-weight:600}.tt-group-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px;padding:4px 0 20px}.tt-group-note{padding:0 18px;opacity:.7}.tt-group-removed{padding:18px;background:rgba(127,127,127,.05)}.tt-group-removed p{margin:6px 0 0;opacity:.7}.tt-groups-empty{text-align:center;padding:28px 18px;border:1px dashed rgba(127,127,127,.3);border-radius:10px;margin-top:18px}.tt-groups-empty p{opacity:.7}.tt-groups-footer{margin-top:16px;opacity:.75;font-size:13px}@media(max-width:600px){.tt-group-main{grid-template-columns:1fr}.tt-group-route-hint,.tt-group-primary{grid-column:1}.tt-groups-add-row{flex-direction:column}.tt-groups-add-row input,.tt-groups-add-row select{min-width:0;width:100%!important}.tt-group-fields{grid-template-columns:1fr}.tt-group-heading{gap:10px}.tt-group-title{flex-basis:100%}}'),
+			E('div', { 'class': 'tt-groups-header' }, [ E('h3', {}, _('Ваши группы сайтов')), count ]),
+			E('p', { 'class': 'tt-groups-intro' }, _('Добавьте нужные сервисы и выберите сервер для каждого. Остальные сайты открываются напрямую.')),
+			catalog.error ? E('p', { 'class': 'alert-message warning' }, catalog.error) : '',
+			!servers.length ? E('p', { 'class': 'alert-message warning' }, _('Нет включённых серверов. Добавьте сервер на вкладке «Серверы», сохраните настройки и вернитесь к группам.')) : '',
+			E('div', { 'class': 'tt-groups-add' }, [ E('strong', {}, _('Добавить сервис или категорию')), E('div', { 'class': 'tt-groups-add-row' }, [ search, picker, add ]), loadCatalog ]),
+			empty, grid,
+			E('p', { 'class': 'tt-groups-footer' }, _('Добавление, отключение и удаление групп вступают в силу после «Сохранить и применить». Отключённая группа сохраняет настройки.'))
 		]);
 	},
 
@@ -380,15 +473,24 @@ return view.extend({
 		}).map(function(s) { return s['.name']; });
 		this.geositeControls.forEach(function(c) {
 			var sid = c.group && c.group['.name'];
-			if (!c.checkbox.checked) {
-				if (sid) uci.remove('trusttunnel', sid);
+			if (c.removed) {
+				if (sid) {
+					uci.remove('trusttunnel', sid);
+					uci.sections('trusttunnel', 'device', function(device) {
+						var groups = L.toArray(device.group).filter(function(id) { return id !== sid; });
+						uci.set('trusttunnel', device['.name'], 'group', groups.length ? groups : '');
+					});
+				}
 				return;
 			}
-			if (!sid) sid = uci.add('trusttunnel', 'group');
-			uci.set('trusttunnel', sid, 'enabled', '1');
+			if (!sid) {
+				sid = uci.add('trusttunnel', 'group', 'grp_' + c.name.replace(/[^A-Za-z0-9_]/g, '_') + '_' + Date.now().toString(16));
+				c.group = { '.name': sid };
+			}
+			uci.set('trusttunnel', sid, 'enabled', c.checkbox.checked ? '1' : '0');
 			uci.set('trusttunnel', sid, 'name', c.name);
 			uci.set('trusttunnel', sid, 'source', [ 'Geosite/' + c.name + '.lst' ]);
-			var chosenPool = Array.prototype.filter.call(c.pool.options, function(o) { return o.selected; }).map(function(o) { return o.value; });
+			var chosenPool = Array.prototype.map.call(c.pool.querySelectorAll('input:checked'), function(input) { return input.value; });
 			var customDomains = c.domains.value.split(/\s+/).map(function(v) { return v.trim().toLowerCase(); }).filter(Boolean);
 			uci.set('trusttunnel', sid, 'domain', customDomains.length ? customDomains : '');
 			uci.set('trusttunnel', sid, 'switch_threshold', c.threshold.value || '');
@@ -403,7 +505,7 @@ return view.extend({
 			} else {
 				uci.set('trusttunnel', sid, 'strategy', 'manual');
 				uci.set('trusttunnel', sid, 'server', c.route.value.replace(/^fixed:/, ''));
-				uci.set('trusttunnel', sid, 'pool', '');
+				uci.set('trusttunnel', sid, 'pool', chosenPool.length ? chosenPool : activeServers);
 				uci.set('trusttunnel', sid, 'primary', '');
 			}
 		});
@@ -487,8 +589,50 @@ return view.extend({
 		return this.super('handleSave', [ ev ]);
 	},
 
-	collect: function() {
+
+	syncGroupServers: function() {
+		var servers = uci.sections('trusttunnel', 'server');
+		var ids = servers.map(function(s) { return s['.name']; });
+		var added = ids.filter(function(id) { return (this.serverIds || ids).indexOf(id) < 0; }, this);
+		function exists(id) { return ids.indexOf(id) >= 0; }
+		(this.geositeControls || []).forEach(function(c) {
+			if (c.route.value.indexOf('fixed:') === 0 && !exists(c.route.value.slice(6))) c.route.value = 'auto';
+			if (c.primary.value && !exists(c.primary.value)) c.primary.value = '';
+			[c.route, c.primary].forEach(function(select) {
+				Array.prototype.forEach.call(select.querySelectorAll('option'), function(option) {
+					var id = select === c.route ? (option.value.indexOf('fixed:') === 0 ? option.value.slice(6) : '') : option.value;
+					if (id && !exists(id)) option.remove();
+				});
+			});
+			Array.prototype.forEach.call(c.pool.querySelectorAll('input'), function(input) {
+				if (!exists(input.value)) input.parentNode.remove();
+			});
+			added.forEach(function(id) {
+				var server = servers.filter(function(s) { return s['.name'] === id; })[0];
+				var check = E('input', { 'type': 'checkbox', 'value': id });
+				check.checked = true;
+				c.pool.appendChild(E('label', {}, [ check, E('span', {}, server.name || id) ]));
+				c.route.appendChild(E('option', { 'value': 'fixed:' + id }, server.name || id));
+				c.primary.appendChild(E('option', { 'value': id }, server.name || id));
+			});
+		});
 		this.collectGeositeGroups();
+		uci.sections('trusttunnel', 'group', function(g) {
+			var savedPool = L.toArray(g.pool);
+			var pool = (savedPool.length ? savedPool : ids).filter(exists);
+			added.forEach(function(id) { if (pool.indexOf(id) < 0) pool.push(id); });
+			uci.set('trusttunnel', g['.name'], 'pool', pool.length ? pool : '');
+			if (g.server && !exists(g.server)) {
+				uci.unset('trusttunnel', g['.name'], 'server');
+				if (g.strategy === 'manual') uci.set('trusttunnel', g['.name'], 'strategy', 'auto');
+			}
+			if (g.primary && !exists(g.primary)) uci.unset('trusttunnel', g['.name'], 'primary');
+		});
+		this.serverIds = ids;
+	},
+
+	collect: function() {
+		this.syncGroupServers();
 		uci.set('trusttunnel', 'main', 'multi_server', '1');
 		uci.set('trusttunnel', 'main', 'mode', 'selective');
 		// Если каталог не загрузился (нет сети и нет кэша), чекбоксы не
@@ -573,6 +717,16 @@ return view.extend({
 		// pasted tt:// link failed with "Expecting: valid UCI identifier" before
 		// the import form could even open. Generate the section ID internally.
 		s.anonymous = true;
+		// Keep the generated identifier when UCI saves the section. Anonymous
+		// cfg identifiers are positional and change when older rows are deleted;
+		// passwords and group pools need a persistent identifier instead.
+		s.handleAdd = function(ev) {
+			var id;
+			do {
+				id = 'srv_' + Date.now().toString(16) + '_' + Math.random().toString(16).slice(2, 10);
+			} while (uci.get('trusttunnel', id));
+			return form.GridSection.prototype.handleAdd.call(this, ev, id);
+		};
 		s.addremove = true;
 		s.addbtntitle = _('Add') + ' ' + _('Server').toLowerCase();
 		s.sortable = true;
@@ -702,7 +856,11 @@ return view.extend({
 			return _('Введите корректный IP-адрес, подсеть или MAC-адрес');
 		};
 		o = s.option(form.MultiValue, 'group', _('Группы сайтов'));
-		o.rmempty = false; o.modalonly = true;
+		o.rmempty = true; o.modalonly = true;
+		o.write = function(sectionID, value) {
+			var groups = L.toArray(value).filter(function(id) { return !!uci.get('trusttunnel', id); });
+			uci.set('trusttunnel', sectionID, 'group', groups.length ? groups : '');
+		};
 		activeGroups.forEach(function(g) {
 			o.value(g['.name'], g.name || g['.name']);
 		});
