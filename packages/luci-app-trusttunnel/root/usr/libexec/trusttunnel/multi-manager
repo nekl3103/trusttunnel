@@ -496,7 +496,7 @@ publish_dnsmasq() {
 	_dir=$(dnsmasq_confdir)
 	mkdir -p "$_dir"
 	if dnsmasq --version 2>/dev/null | grep -q 'no-nftset'; then
-		rm -f "$_dir/trusttunnel-multi.conf"
+		rm -f "$_dir/trusttunnel-multi.conf" "$OUTDIR/dnsmasq.loaded"
 		log 'dnsmasq has no nftset support; install dnsmasq-full'
 		return 1
 	fi
@@ -504,8 +504,9 @@ publish_dnsmasq() {
 	cp "$OUTDIR/dnsmasq.conf" "$_dir/trusttunnel-multi.conf"
 	chmod 644 "$_dir/trusttunnel-multi.conf"
 	if [ ! -f "$OUTDIR/dnsmasq.loaded" ] || ! cmp -s "$OUTDIR/dnsmasq.conf" "$OUTDIR/dnsmasq.loaded"; then
+		rm -f "$OUTDIR/dnsmasq.loaded"
+		$DNSMASQ_INIT restart >/dev/null 2>&1 || return 1
 		cp "$OUTDIR/dnsmasq.conf" "$OUTDIR/dnsmasq.loaded"
-		$DNSMASQ_INIT restart >/dev/null 2>&1
 	fi
 }
 
@@ -639,7 +640,9 @@ down() {
 		$IP -6 route flush table "$table" 2>/dev/null || true
 	done < "$OUTDIR/servers.tsv"
 	$NFT delete table inet "$TABLE_NAME" 2>/dev/null || true
-	_dir=$(dnsmasq_confdir); rm -f "$_dir/trusttunnel-multi.conf"; $DNSMASQ_INIT restart >/dev/null 2>&1 || true
+	_dir=$(dnsmasq_confdir)
+	rm -f "$_dir/trusttunnel-multi.conf" "$OUTDIR/dnsmasq.loaded"
+	$DNSMASQ_INIT restart >/dev/null 2>&1 || true
 }
 
 cmd=${1:-status}
